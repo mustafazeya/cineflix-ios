@@ -1,0 +1,70 @@
+name: CineFlix
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  CineFlix:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+    configFiles:
+      Debug: Config/App.xcconfig
+      Release: Config/App.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(CF_BUNDLE_ID)
+        PRODUCT_NAME: CineFlix
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: CineFlix
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: CineFlix connects to your own media server on the local network.
+        ITSAppUsesNonExemptEncryption: false
+        TMDBToken: $(TMDB_TOKEN)
+        SubDLKey: $(SUBDL_KEY)
+  CineFlixUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: CineFlix
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(CF_BUNDLE_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+schemes:
+  CineFlix:
+    build:
+      targets:
+        CineFlix: all
+        CineFlixUITests: [test]
+    test:
+      targets: [CineFlixUITests]

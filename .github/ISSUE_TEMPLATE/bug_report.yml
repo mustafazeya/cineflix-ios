@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Never paste API keys, tokens or private server addresses.** Remove them from logs and screenshots.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Press ...
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: iPhone model and iOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: server
+    attributes:
+      label: What does your server return for a title?
+      options:
+        - A video file (MP4)
+        - An HLS stream
+        - A web page with its own player
+        - Not relevant
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

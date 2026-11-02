@@ -1,0 +1,5 @@
+// Copy to Signing.xcconfig (git-ignored) and use your own values.
+// Bundle id: must be unique to you, for example com.yourname.cineflix
+CF_BUNDLE_ID = com.yourname.cineflix
+// Apple Developer Team ID: Xcode > Settings > Accounts, or developer.apple.com > Membership (a free personal team works)
+DEVELOPMENT_TEAM = ABCDE12345

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+
+      - name: Repository has no private files
+        run: |
+          if git ls-files | grep -E 'Config/(Secrets|Signing)\.xcconfig$'; then
+            echo "A private file is tracked"; exit 1
+          fi
+
+      - name: Shell scripts parse
+        run: |
+          for f in install-iphone.sh scripts/*.sh; do bash -n "$f"; done
+          scripts/install-launchagent.sh --print | plutil -lint -
+
+      - name: Generate project
+        run: |
+          cp Config/Secrets.example.xcconfig Config/Secrets.xcconfig
+          xcodegen generate
+
+      - name: Build for the simulator
+        run: |
+          xcodebuild build -project CineFlix.xcodeproj -scheme CineFlix \
+            -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO -quiet
