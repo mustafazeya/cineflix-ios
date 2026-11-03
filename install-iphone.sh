@@ -29,10 +29,18 @@ failed=0
 for device in "${devices[@]}"; do
   echo "== $device"
   # Each device gets its own build so the signing profile includes it.
-  if ! xcodebuild -project CineFlix.xcodeproj -scheme CineFlix -configuration Release \
-      -destination "id=$device" -derivedDataPath "build/device-$device" -allowProvisioningUpdates -quiet build; then
-    echo "Build failed for $device"; failed=1; continue
-  fi
+  # Xcode sometimes lists a reachable phone late ("Unable to find a destination"), so wait and retry a few times.
+  built=0
+  for attempt in 1 2 3 4; do
+    out=$(xcodebuild -project CineFlix.xcodeproj -scheme CineFlix -configuration Release \
+        -destination "id=$device" -derivedDataPath "build/device-$device" -allowProvisioningUpdates -quiet build 2>&1) && { built=1; break; }
+    if grep -Eq "Unable to find a (destination|device)" <<<"$out" && [ "$attempt" -lt 4 ]; then
+      echo "Xcode does not list $device yet; retrying in 20 s ($attempt/4)"; sleep 20
+    else
+      echo "$out" | tail -40; break
+    fi
+  done
+  [ "$built" = 1 ] || { echo "Build failed for $device"; failed=1; continue; }
   app=$(find "build/device-$device/Build/Products/Release-iphoneos" -maxdepth 1 -name CineFlix.app | head -1)
   if ! xcrun devicectl device install app --device "$device" "$app" >/dev/null; then
     echo "Install failed for $device"; failed=1; continue
