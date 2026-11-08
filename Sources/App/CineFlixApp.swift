@@ -3,12 +3,19 @@ import AVFoundation
 
 @main
 struct CineFlixApp: App {
-    @State private var settings = AppSettings()
-    @State private var library = Library()
+    @State private var settings: AppSettings
+    @State private var library: Library
     @State private var catalog = CatalogState()
     @State private var presenter = PlayerPresenter()
+    @State private var sync: SyncService
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        let settings = AppSettings()
+        let library = Library()
+        _settings = State(initialValue: settings)
+        _library = State(initialValue: library)
+        _sync = State(initialValue: SyncService(library: library, settings: settings))
         URLCache.shared = URLCache(memoryCapacity: 96 << 20, diskCapacity: 512 << 20)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }
@@ -20,8 +27,12 @@ struct CineFlixApp: App {
                 .environment(library)
                 .environment(catalog)
                 .environment(presenter)
+                .environment(sync)
                 .preferredColorScheme(.dark)
                 .tint(.white)
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { sync.activate() } else { sync.deactivate() }
+                }
         }
     }
 }
@@ -32,6 +43,7 @@ struct RootView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(CatalogState.self) private var catalog
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(SyncService.self) private var sync
     @State private var tab: AppTab = .home
     @State private var splash = true
     @State private var showSettings = false
@@ -68,6 +80,9 @@ struct RootView: View {
             withAnimation(.easeOut(duration: 0.45)) { splash = false }
             _ = await (g, c)
             if !settings.hasTMDB { showSettings = true }
+        }
+        .fullScreenCover(isPresented: Binding(get: { sync.needsProfile }, set: { _ in })) {
+            ProfilePickerView(dismissable: false)
         }
         .fullScreenCover(item: $presenter.current) { request in
             PlayerScreen(request: request)

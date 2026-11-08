@@ -90,10 +90,18 @@ struct MediaServer: Sendable {
         }
     }
 
+    /// A link saved under My Videos: a video file, an HLS stream, or a page with its own player.
+    /// The server token is only ever sent to the user's own server, never to other hosts.
+    func resolveLink(_ link: URL) async throws -> Playback {
+        let url = withToken(link)
+        if ["m3u8", "mp4", "m4v", "mov"].contains(link.pathExtension.lowercased()) { return .video(url) }
+        return try await probe(url, authorized: url != link)
+    }
+
     /// Reads only the response headers (and a few bytes if needed) to tell a video from a web page.
-    private func probe(_ url: URL) async throws -> Playback {
+    private func probe(_ url: URL, authorized: Bool = true) async throws -> Playback {
         var req = URLRequest(url: url, timeoutInterval: 10)
-        if !token.isEmpty { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if authorized, !token.isEmpty { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let bytes: URLSession.AsyncBytes
         let resp: URLResponse
         do {

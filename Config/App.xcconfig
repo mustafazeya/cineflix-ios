@@ -1,6 +1,8 @@
 // Build settings. Secrets and signing live in git-ignored files; see the *.example.xcconfig files.
 TMDB_TOKEN =
 SUBDL_KEY =
+SYNC_SERVER =
+SYNC_SIGNUP_CODE =
 CF_BUNDLE_ID = com.example.cineflix
 DEVELOPMENT_TEAM =
 #include? "Secrets.xcconfig"

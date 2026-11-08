@@ -2,11 +2,12 @@
 # Builds CineFlix and installs it on connected iPhones.
 #   ./install-iphone.sh                   -> every paired iPhone
 #   ./install-iphone.sh <device-id> ...   -> only those
-#   ./install-iphone.sh --no-launch ...   -> don't open the app afterwards (used by the daily job)
+#   ./install-iphone.sh --launch ...      -> open the app afterwards (the default is to install silently)
 set -uo pipefail
 cd "$(dirname "$0")"
-launch=1
-if [ "${1:-}" = "--no-launch" ]; then launch=0; shift; fi
+launch=0
+if [ "${1:-}" = "--launch" ]; then launch=1; shift; fi
+if [ "${1:-}" = "--no-launch" ]; then shift; fi
 
 [ -f Config/Secrets.xcconfig ] || echo "Note: Config/Secrets.xcconfig missing; the app will ask for a TMDB token."
 xcodegen generate >/dev/null

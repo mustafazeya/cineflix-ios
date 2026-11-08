@@ -112,3 +112,48 @@ final class SubtitleUITests: XCTestCase {
     @MainActor func testPageWithoutBridge() throws { try run(streamBase: "http://localhost:8112", type: "page", "page") }
     @MainActor func testNativeVideo() throws { try run(streamBase: "http://localhost:8090", type: "auto", "native") }
 }
+
+/// The iPhone's own full screen video player must keep showing subtitles. Needs a player page with a "Maximise" button
+/// on :8112 and a saved subtitle for Tears of Steel (see the seeding step in the test notes).
+final class SubtitleFullscreenUITests: XCTestCase {
+    @MainActor func testSubtitlesSurviveMaximise() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-cf.streamBase", "http://localhost:8112", "-cf.streamType", "page", "-cf.resetLibrary", "YES"]
+        app.launch()
+        app.tabBars.buttons["Search"].tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap(); field.typeText("Tears of Steel")
+        let result = app.buttons["Tears of Steel"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 15)); result.tap()
+        let play = app.buttons["Play"].firstMatch
+        XCTAssertTrue(play.waitForExistence(timeout: 15)); play.tap()
+
+        let max = app.webViews.buttons["Maximise"].firstMatch
+        XCTAssertTrue(max.waitForExistence(timeout: 20), "page shown")
+        sleep(4)
+        let inline = XCTAttachment(screenshot: app.screenshot()); inline.name = "fs-inline"; inline.lifetime = .keepAlways; add(inline)
+        max.tap()
+        sleep(5)
+        let full = XCTAttachment(screenshot: app.screenshot()); full.name = "fs-full"; full.lifetime = .keepAlways; add(full)
+    }
+}
+
+/// The Home hero has Play, My List and a Details button that opens the title's page.
+final class HeroUITests: XCTestCase {
+    @MainActor func testHeroDetailsButton() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-cf.resetLibrary", "YES"]
+        app.launch()
+        let details = app.buttons["hero-details"].firstMatch
+        XCTAssertTrue(details.waitForExistence(timeout: 25), "hero shows a Details button")
+        sleep(2)
+        let a = XCTAttachment(screenshot: app.screenshot()); a.name = "hero"; a.lifetime = .keepAlways; add(a)
+        details.tap()
+        let onPage = NSPredicate(format: "isHittable == false")
+        expectation(for: onPage, evaluatedWith: details)
+        waitForExpectations(timeout: 15)
+        XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 15), "Details opens the title page (back button shown)")
+        let b = XCTAttachment(screenshot: app.screenshot()); b.name = "details"; b.lifetime = .keepAlways; add(b)
+    }
+}

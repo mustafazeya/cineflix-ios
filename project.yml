@@ -49,6 +49,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         TMDBToken: $(TMDB_TOKEN)
         SubDLKey: $(SUBDL_KEY)
+        SyncServer: $(SYNC_SERVER)
+        SyncSignupCode: $(SYNC_SIGNUP_CODE)
   CineFlixUITests:
     type: bundle.ui-testing
     platform: iOS

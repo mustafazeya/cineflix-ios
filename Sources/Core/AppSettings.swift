@@ -9,6 +9,9 @@ final class AppSettings {
     private let defaults = UserDefaults.standard
     private static let bundledToken = (Bundle.main.object(forInfoDictionaryKey: "TMDBToken") as? String) ?? ""
     private static let bundledSubDL = (Bundle.main.object(forInfoDictionaryKey: "SubDLKey") as? String) ?? ""
+    private static let bundledSync = (Bundle.main.object(forInfoDictionaryKey: "SyncServer") as? String) ?? ""
+    /// Lets phones create an account without typing anything. It only opens sign-up on your own sync server.
+    let syncSignupCode: String = (Bundle.main.object(forInfoDictionaryKey: "SyncSignupCode") as? String) ?? ""
 
     var tmdbToken: String { didSet { save("tmdbToken", tmdbToken) } }
     var language: String { didSet { save("language", language) } }
@@ -20,6 +23,7 @@ final class AppSettings {
     var trailerPage: String { didSet { save("trailerPage", trailerPage) } }
     var subdlKey: String { didSet { save("subdlKey", subdlKey) } }
     var subLangs: String { didSet { save("subLangs", subLangs) } }
+    var syncServer: String { didSet { save("syncServer", syncServer) } }
     var hideWatched: Bool { didSet { defaults.set(hideWatched, forKey: "cf.hideWatched") } }
 
     init() {
@@ -35,6 +39,7 @@ final class AppSettings {
         trailerPage = value("trailerPage", Self.defaultTrailerPage)
         subdlKey = value("subdlKey", Self.bundledSubDL)
         subLangs = value("subLangs", "EN")
+        syncServer = value("syncServer", Self.bundledSync)
         hideWatched = defaults.object(forKey: "cf.hideWatched") as? Bool ?? true
     }
 

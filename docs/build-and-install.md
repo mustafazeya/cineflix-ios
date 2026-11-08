@@ -50,7 +50,7 @@ Without this file the project uses `com.example.cineflix` and no team, which bui
 ```bash
 ./install-iphone.sh                       # every paired iPhone
 ./install-iphone.sh <device-id> ...       # only these
-./install-iphone.sh --no-launch ...       # do not open the app afterwards
+./install-iphone.sh --launch ...          # open the app afterwards (the default is a silent install)
 ```
 
 Find device ids with `scripts/list-iphones.sh` (it prints id, name and whether the phone is paired).

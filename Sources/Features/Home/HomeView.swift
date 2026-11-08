@@ -8,12 +8,13 @@ struct HomeView: View {
 
     @State private var hero: [MediaItem] = []
     @State private var reloadID = UUID()
+    @State private var detail: MediaRef?
 
     var body: some View {
         let tmdb = settings.tmdb
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                HeroCarousel(items: hero)
+                HeroCarousel(items: hero, onDetails: { detail = $0 })
 
                 if !library.continueWatching.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -67,6 +68,7 @@ struct HomeView: View {
         .background(Theme.bg)
         .ignoresSafeArea(edges: .top)
         .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(item: $detail) { DetailView(ref: $0) }
         .refreshable {
             await ResponseCache.shared.clear()
             await catalog.refresh(settings, force: true)
@@ -88,6 +90,7 @@ struct HomeView: View {
 
 struct HeroCarousel: View {
     let items: [MediaItem]
+    var onDetails: (MediaRef) -> Void = { _ in }
     @State private var page: MediaRef?
 
     var body: some View {
@@ -98,7 +101,7 @@ struct HeroCarousel: View {
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 0) {
                         ForEach(items, id: \.ref) { item in
-                            HeroPage(item: item).containerRelativeFrame(.horizontal)
+                            HeroPage(item: item, onDetails: { onDetails(item.ref) }).containerRelativeFrame(.horizontal)
                         }
                     }
                     .scrollTargetLayout()
@@ -132,6 +135,7 @@ struct HeroCarousel: View {
 
 private struct HeroPage: View {
     let item: MediaItem
+    let onDetails: () -> Void
     @Environment(AppSettings.self) private var settings
     @Environment(Library.self) private var library
     @Environment(CatalogState.self) private var catalog
@@ -143,7 +147,9 @@ private struct HeroPage: View {
             Color.clear
                 .frame(maxWidth: .infinity)
                 .frame(height: 560)
-                .overlay(Artwork(url: TMDB.image(item.backdropPath, "w1280")))
+                // The artwork is wider than the screen. Clipping hides the overflow but it would still catch touches
+                // meant for the buttons on the neighbouring pages, so it must not take part in hit testing.
+                .overlay(Artwork(url: TMDB.image(item.backdropPath, "w1280")).allowsHitTesting(false))
                 .clipped()
                 .overlay {
                     LinearGradient(stops: [
@@ -196,6 +202,16 @@ private struct HeroPage: View {
                     }
                     .buttonStyle(.glass)
                     .sensoryFeedback(.success, trigger: library.inMyList(item.ref))
+
+                    Button(action: onDetails) {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 20, weight: .semibold))
+                            .frame(width: 50, height: 50)
+                    }
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .accessibilityLabel("Details")
+                    .accessibilityIdentifier("hero-details")
                 }
                 .padding(.horizontal, 24)
             }

@@ -47,7 +47,7 @@ struct SearchView: View {
 }
 
 struct MyStuffView: View {
-    enum Section: String, CaseIterable { case list = "My List", watched = "Watched" }
+    enum Section: String, CaseIterable { case list = "My List", watched = "Watched", videos = "Videos" }
 
     @Environment(AppSettings.self) private var settings
     @Environment(Library.self) private var library
@@ -58,6 +58,8 @@ struct MyStuffView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                AccountCard()
+
                 if !library.continueWatching.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         RowHeader(title: "Continue Watching")
@@ -95,6 +97,8 @@ struct MyStuffView: View {
                     } else {
                         PosterGrid(items: library.watchedItems)
                     }
+                case .videos:
+                    VideosSection()
                 }
             }
             .padding(.vertical, 8)
@@ -141,6 +145,8 @@ struct SettingsView: View {
             } footer: {
                 Text("Plays {url}/movie/{tmdbId} and {url}/tv/{tmdbId}/{season}/{episode}. The catalog defaults to the Stream URL.")
             }
+
+            SyncSettingsSection()
 
             Section("Catalog (TMDB)") {
                 SecureField("TMDB read access token", text: $s.tmdbToken)
