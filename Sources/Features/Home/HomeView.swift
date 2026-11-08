@@ -183,12 +183,10 @@ private struct HeroPage: View {
                 MetaLine(rating: item.rating, parts: [item.year].compactMap { $0 } + catalog.genres(item, max: 2))
 
                 HStack(spacing: 10) {
-                    Button {
-                        presenter.play(PlaybackRequest(ref: item.ref, season: item.type == .tv ? 1 : nil, episode: item.type == .tv ? 1 : nil,
-                                                       title: item.title, backdropPath: item.backdropPath, posterPath: item.posterPath, item: item),
-                                       settings: settings)
-                    } label: {
-                        Label("Play", systemImage: "play.fill")
+                    Button(action: play) {
+                        Label(playLabel, systemImage: "play.fill")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .buttonStyle(PrimaryButtonStyle())
 
@@ -218,5 +216,33 @@ private struct HeroPage: View {
             .padding(.bottom, 26)
         }
         .task { logo = await settings.tmdb.logo(item.ref) }
+    }
+
+    // Play, or Resume when the title is in Continue Watching: the same wording as its details page.
+    private var progress: WatchProgress? { library.resumable(item.ref) }
+
+    private var playLabel: String {
+        guard let p = progress else { return "Play" }
+        if item.type == .tv, let s = p.season, let e = p.episode { return p.finished ? "Play Next Episode" : "Resume S\(s) E\(e)" }
+        return "Resume"
+    }
+
+    private func play() {
+        if let p = progress {
+            if p.finished, item.type == .tv, let s = p.season, let e = p.episode {
+                Task {
+                    guard let next = await settings.tmdb.nextEpisode(showID: item.id, season: s, episode: e) else { return }
+                    presenter.play(PlaybackRequest(ref: item.ref, season: next.season, episode: next.episode.episodeNumber, title: item.title,
+                                                   subtitle: next.episode.name, backdropPath: item.backdropPath, posterPath: item.posterPath,
+                                                   stillPath: next.episode.stillPath, item: item), settings: settings)
+                }
+                return
+            }
+            presenter.resume(p, settings: settings)
+            return
+        }
+        presenter.play(PlaybackRequest(ref: item.ref, season: item.type == .tv ? 1 : nil, episode: item.type == .tv ? 1 : nil,
+                                       title: item.title, backdropPath: item.backdropPath, posterPath: item.posterPath, item: item),
+                       settings: settings)
     }
 }

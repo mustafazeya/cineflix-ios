@@ -187,9 +187,14 @@ final class Library {
 
     func progress(for ref: MediaRef) -> WatchProgress? { progress[ref.key] }
 
+    /// Progress worth resuming: exactly what Continue Watching lists.
+    private static func isResumable(_ p: WatchProgress) -> Bool { p.position > 30 || p.ref.type == .tv || p.duration == 0 }
+
+    func resumable(_ ref: MediaRef) -> WatchProgress? { progress[ref.key].flatMap { Self.isResumable($0) ? $0 : nil } }
+
     var continueWatching: [WatchProgress] {
         progress.values
-            .filter { $0.position > 30 || $0.ref.type == .tv || $0.duration == 0 }
+            .filter(Self.isResumable)
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
