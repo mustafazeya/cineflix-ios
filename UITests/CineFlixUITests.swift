@@ -7,7 +7,7 @@ final class CineFlixUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments += ["-cf.streamBase", "http://localhost:8090", "-cf.streamType", "auto", "-cf.hideWatched", "YES", "-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.streamBase", "http://localhost:8090", "-cf.streamType", "auto", "-cf.hideWatched", "YES", "-cf.resetLibrary", "YES"]
         app.launch()
     }
 
@@ -75,7 +75,7 @@ final class CineFlixUITests: XCTestCase {
 final class SubtitleUITests: XCTestCase {
     private func run(streamBase: String, type: String, _ name: String) throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-cf.streamBase", streamBase, "-cf.streamType", type, "-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.streamBase", streamBase, "-cf.streamType", type, "-cf.resetLibrary", "YES"]
         app.launch()
 
         app.tabBars.buttons["Search"].tap()
@@ -118,7 +118,7 @@ final class SubtitleUITests: XCTestCase {
 final class SubtitleFullscreenUITests: XCTestCase {
     @MainActor func testSubtitlesSurviveMaximise() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-cf.streamBase", "http://localhost:8112", "-cf.streamType", "page", "-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.streamBase", "http://localhost:8112", "-cf.streamType", "page", "-cf.resetLibrary", "YES"]
         app.launch()
         app.tabBars.buttons["Search"].tap()
         let field = app.searchFields.firstMatch
@@ -143,7 +143,7 @@ final class SubtitleFullscreenUITests: XCTestCase {
 final class HeroUITests: XCTestCase {
     @MainActor func testHeroDetailsButton() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.resetLibrary", "YES"]
         app.launch()
         let details = app.buttons["hero-details"].firstMatch
         XCTAssertTrue(details.waitForExistence(timeout: 25), "hero shows a Details button")

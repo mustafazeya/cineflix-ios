@@ -6,6 +6,7 @@ struct CineFlixApp: App {
     @State private var settings: AppSettings
     @State private var library: Library
     @State private var catalog = CatalogState()
+    @State private var kidsVisibility = KidsVisibility()
     @State private var presenter = PlayerPresenter()
     @State private var sync: SyncService
     @Environment(\.scenePhase) private var scenePhase
@@ -18,6 +19,7 @@ struct CineFlixApp: App {
         _sync = State(initialValue: SyncService(library: library, settings: settings))
         URLCache.shared = URLCache(memoryCapacity: 96 << 20, diskCapacity: 512 << 20)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        CastManager.shared.configure()
     }
 
     var body: some Scene {
@@ -28,6 +30,7 @@ struct CineFlixApp: App {
                 .environment(catalog)
                 .environment(presenter)
                 .environment(sync)
+                .environment(kidsVisibility)
                 .preferredColorScheme(.dark)
                 .tint(.white)
                 .onChange(of: scenePhase) { _, phase in
@@ -37,6 +40,9 @@ struct CineFlixApp: App {
     }
 }
 
+private struct ContinueCheck: Hashable { let refs: [MediaRef]; let policy: KidsPolicy? }
+private struct AppSession: Hashable { let profile: String?; let policy: KidsPolicy? }
+
 enum AppTab: Hashable { case home, browse, mine, search }
 
 struct RootView: View {
@@ -44,6 +50,8 @@ struct RootView: View {
     @Environment(CatalogState.self) private var catalog
     @Environment(PlayerPresenter.self) private var presenter
     @Environment(SyncService.self) private var sync
+    @Environment(Library.self) private var library
+    @Environment(KidsVisibility.self) private var visibility
     @State private var tab: AppTab = .home
     @State private var splash = true
     @State private var showSettings = false
@@ -68,6 +76,9 @@ struct RootView: View {
             }
             .tabBarMinimizeBehavior(.onScrollDown)
             .background(Theme.bg)
+            // A new profile, or new restrictions, start every tab over: rows, search, open title pages. A kids profile never sees
+            // what the previous profile had open.
+            .id(AppSession(profile: sync.activeProfileID, policy: settings.kidsPolicy))
 
             if splash {
                 SplashView().transition(.opacity).zIndex(1)
@@ -81,9 +92,13 @@ struct RootView: View {
             _ = await (g, c)
             if !settings.hasTMDB { showSettings = true }
         }
-        .fullScreenCover(isPresented: Binding(get: { sync.needsProfile }, set: { _ in })) {
-            ProfilePickerView(dismissable: false)
+        .task(id: ContinueCheck(refs: library.continueWatching.map(\.ref), policy: settings.kidsPolicy)) {
+            await visibility.refresh(library.continueWatching.map(\.ref), policy: settings.kidsPolicy, tmdb: settings.tmdb)
         }
+        .fullScreenCover(isPresented: Binding(get: { sync.needsProfile || sync.showPicker }, set: { if !$0 { sync.showPicker = false } })) {
+            ProfilePickerView(dismissable: !sync.needsProfile)
+        }
+        .pinGate()
         .fullScreenCover(item: $presenter.current) { request in
             PlayerScreen(request: request)
         }

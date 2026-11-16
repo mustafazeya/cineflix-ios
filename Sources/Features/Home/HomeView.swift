@@ -9,6 +9,7 @@ struct HomeView: View {
     @State private var hero: [MediaItem] = []
     @State private var reloadID = UUID()
     @State private var detail: MediaRef?
+    @State private var cast = CastManager.shared
 
     var body: some View {
         let tmdb = settings.tmdb
@@ -16,24 +17,7 @@ struct HomeView: View {
             LazyVStack(alignment: .leading, spacing: 28) {
                 HeroCarousel(items: hero, onDetails: { detail = $0 })
 
-                if !library.continueWatching.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        RowHeader(title: "Continue Watching")
-                        ScrollView(.horizontal) {
-                            LazyHStack(spacing: 10) {
-                                ForEach(library.continueWatching, id: \.ref) { p in
-                                    Button { presenter.resume(p, settings: settings) } label: { ContinueCard(progress: p) }
-                                        .buttonStyle(.plain)
-                                        .contextMenu {
-                                            NavigationLink(value: Route.title(p.ref)) { Label("Details", systemImage: "info.circle") }
-                                        }
-                                }
-                            }
-                        }
-                        .contentMargins(.horizontal, 16, for: .scrollContent)
-                        .scrollIndicators(.hidden)
-                    }
-                }
+                ContinueWatchingRow()
 
                 if !catalog.recent.isEmpty {
                     LoadingRow(title: "Recently Added to Your Library") {
@@ -48,17 +32,22 @@ struct HomeView: View {
                     }
                 }
 
-                LoadingRow(title: "Top 10 Today", style: .top10) { try await tmdb.trending(nil) }
-                LoadingRow(title: "New Releases", style: .landscape) { try await tmdb.list(.movie, "now_playing").items }
-                LoadingRow(title: "Popular Movies") { try await tmdb.list(.movie, "popular").items }
-                LoadingRow(title: "Popular TV Shows", style: .landscape) { try await tmdb.list(.tv, "popular").items }
-                LoadingRow(title: "New Episodes This Week") { try await tmdb.list(.tv, "on_the_air").items }
-                LoadingRow(title: "Top Rated Movies", style: .landscape) { try await tmdb.list(.movie, "top_rated").items }
-                LoadingRow(title: "Top Rated TV Shows") { try await tmdb.list(.tv, "top_rated").items }
-                LoadingRow(title: "Coming Soon", style: .landscape) { try await tmdb.list(.movie, "upcoming").items }
-                ForEach(Array(Self.genres.enumerated()), id: \.offset) { i, g in
-                    LoadingRow(title: g.1, style: i % 2 == 0 ? .poster : .landscape) {
-                        try await tmdb.discover(.movie, ["with_genres": String(g.0)]).items
+                if settings.kidsPolicy != nil {
+                    kidsRows(tmdb)
+                } else {
+                    LoadingRow(title: "Top 10 Today", style: .top10) { try await tmdb.trending(nil) }
+                    LoadingRow(title: "New Releases", style: .landscape) { try await tmdb.list(.movie, "now_playing").items }
+                    LoadingRow(title: "Popular Movies") { try await tmdb.list(.movie, "popular").items }
+                    LoadingRow(title: "Popular TV Shows", style: .landscape) { try await tmdb.list(.tv, "popular").items }
+                    becauseYouWatched
+                    LoadingRow(title: "New Episodes This Week") { try await tmdb.list(.tv, "on_the_air").items }
+                    LoadingRow(title: "Top Rated Movies", style: .landscape) { try await tmdb.list(.movie, "top_rated").items }
+                    LoadingRow(title: "Top Rated TV Shows") { try await tmdb.list(.tv, "top_rated").items }
+                    LoadingRow(title: "Coming Soon", style: .landscape) { try await tmdb.list(.movie, "upcoming").items }
+                    ForEach(Array(Self.genres.enumerated()), id: \.offset) { i, g in
+                        LoadingRow(title: g.1, style: i % 2 == 0 ? .poster : .landscape) {
+                            try await tmdb.discover(.movie, ["with_genres": String(g.0)]).items
+                        }
                     }
                 }
             }
@@ -68,6 +57,14 @@ struct HomeView: View {
         .background(Theme.bg)
         .ignoresSafeArea(edges: .top)
         .toolbar(.hidden, for: .navigationBar)
+        .overlay(alignment: .topTrailing) {
+            if cast.hasDevices || cast.hasSession {
+                PlayerControl { CastButton() }
+                    .padding(.trailing, 16)
+                    .padding(.top, 8)
+                    .accessibilityLabel("Cast")
+            }
+        }
         .navigationDestination(item: $detail) { DetailView(ref: $0) }
         .refreshable {
             await ResponseCache.shared.clear()
@@ -78,12 +75,68 @@ struct HomeView: View {
         .task(id: settings.tmdbToken) { await loadHero() }
     }
 
+
+    /// Up to two rows based on what was thumbed up or watched. They sit among the main rows, so they only load when scrolled near.
+    @ViewBuilder private var becauseYouWatched: some View {
+        ForEach(library.recommendationSeeds(limit: 2), id: \.ref) { seed in
+            BecauseYouWatchedRow(seed: seed)
+        }
+    }
+
+    /// Home for a kids profile. The catalog client already limits every list to what the profile may see; these queries start from
+    /// the family and animation catalogue so the rows are not mostly filtered away.
+    @ViewBuilder private func kidsRows(_ tmdb: TMDB) -> some View {
+        LoadingRow(title: "Popular Movies") { try await tmdb.discover(.movie, [:]).items }
+        LoadingRow(title: "Popular TV Shows", style: .landscape) { try await tmdb.discover(.tv, [:]).items }
+        becauseYouWatched
+        LoadingRow(title: "New Releases", style: .landscape) {
+            try await tmdb.discover(.movie, ["sort_by": "primary_release_date.desc", "primary_release_date.lte": TMDB.today, "vote_count.gte": "20"]).items
+        }
+        LoadingRow(title: "Animation") { try await tmdb.discover(.movie, ["with_genres": String(KidsPolicy.Genre.animation)]).items }
+        LoadingRow(title: "Kids TV", style: .landscape) { try await tmdb.discover(.tv, ["with_genres": String(KidsPolicy.Genre.kids)]).items }
+        LoadingRow(title: "Family Movies") { try await tmdb.discover(.movie, ["with_genres": String(KidsPolicy.Genre.family)]).items }
+        LoadingRow(title: "Top Rated Movies", style: .landscape) {
+            try await tmdb.discover(.movie, ["sort_by": "vote_average.desc", "vote_count.gte": "500"]).items
+        }
+    }
+
     private static let genres: [(Int, String)] = [(28, "Action"), (35, "Comedy"), (18, "Drama"), (53, "Thrillers"), (878, "Sci-Fi")]
 
     private func loadHero() async {
-        let items = (try? await settings.tmdb.trending(nil)) ?? []
+        // A kids profile's hero comes from its own kid-safe list, never from trending.
+        let tmdb = settings.tmdb
+        let items = (try? await (tmdb.kids == nil ? tmdb.trending(nil) : tmdb.discover(.movie, [:]).items)) ?? []
         hero = Array(items.filter { $0.backdropPath != nil }.prefix(6))
     }
+}
+
+// MARK: - Because you watched
+
+private struct BecauseYouWatchedRow: View {
+    let seed: MediaItem
+    @Environment(AppSettings.self) private var settings
+    @Environment(Library.self) private var library
+    @State private var items: [MediaItem]?
+
+    var body: some View {
+        // Titles already watched or thumbed down are left out when shown, so the row follows later changes without reloading.
+        let shown = (items ?? []).filter { $0.ref != seed.ref && !library.isWatched($0.ref) && library.rating(for: $0.ref) >= 0 }
+        Group {
+            if items == nil {
+                SkeletonRow()
+            } else if !shown.isEmpty {
+                MediaRow(title: "Because you watched \(seed.title)", items: shown)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("because-\(seed.ref.key)")
+        .task(id: LoadKey(ref: seed.ref, policy: settings.kidsPolicy)) {
+            let loaded = await settings.tmdb.recommendations(seed.ref)
+            if !Task.isCancelled { items = loaded }
+        }
+    }
+
+    private struct LoadKey: Hashable { let ref: MediaRef; let policy: KidsPolicy? }
 }
 
 // MARK: - Hero

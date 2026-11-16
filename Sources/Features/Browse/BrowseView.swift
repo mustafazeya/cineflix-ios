@@ -100,13 +100,13 @@ struct BrowseView: View {
         }
         .onChange(of: filters) { _, new in
             Task {
-                if genres.isEmpty || new.genre == nil { genres = (try? await settings.tmdb.genres(new.type)) ?? [] }
+                if genres.isEmpty || new.genre == nil { genres = await loadGenres(new.type) }
                 await reload()
             }
         }
         .onChange(of: filters.type) { filters.genre = nil }
         .onChange(of: settings.hideWatched) { Task { await reload() } }
-        .task(id: filters.type) { genres = (try? await settings.tmdb.genres(filters.type)) ?? [] }
+        .task(id: filters.type) { genres = await loadGenres(filters.type) }
     }
 
     // MARK: Filter bar
@@ -179,6 +179,13 @@ struct BrowseView: View {
     }
 
     // MARK: Loading
+
+    /// A kids profile is only offered genres that are not mostly adult titles.
+    private func loadGenres(_ type: MediaType) async -> [Genre] {
+        let all = (try? await settings.tmdb.genres(type)) ?? []
+        guard let kids = settings.kidsPolicy else { return all }
+        return all.filter { kids.genresAllowed([$0.id]) }
+    }
 
     private func reload() async {
         generation += 1

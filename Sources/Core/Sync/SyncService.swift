@@ -26,6 +26,17 @@ final class SyncService {
     private(set) var isBusy = false
     /// Set when the server rejected this phone's sign-in (signed out from another device, or the password changed).
     private(set) var signedOutNotice = false
+    /// A PIN prompt waiting to be shown: set while the person tries to leave a PIN-protected kids profile.
+    var pinRequest: PinRequest?
+    /// Shows the "Who's watching?" picker over the whole app (from the account menu).
+    var showPicker = false
+
+    struct PinRequest: Identifiable {
+        let id = UUID()
+        let profile: SyncProfile
+        let reason: String
+        let action: @MainActor () -> Void
+    }
 
     private let library: Library
     private let settings: AppSettings
@@ -62,6 +73,21 @@ final class SyncService {
         } else if isSignedIn {
             activeProfileID = nil
         }
+        applyKidsPolicy()
+    }
+
+    /// Tells the catalog client which restrictions apply to the profile this phone shows.
+    private func applyKidsPolicy() {
+        let policy = isSignedIn ? activeProfile?.kidsPolicy : nil
+        if settings.kidsPolicy != policy { settings.kidsPolicy = policy }
+    }
+
+    /// True while a kids profile with a PIN is showing: leaving it needs that PIN.
+    var leavingNeedsPIN: Bool { isSignedIn && activeProfile?.kids == true && activeProfile?.hasPin == true }
+
+    /// Runs `action` straight away, or after the PIN of the active kids profile has been entered.
+    func guardLeaving(_ reason: String, _ action: @escaping @MainActor () -> Void) {
+        if leavingNeedsPIN, let p = activeProfile { pinRequest = PinRequest(profile: p, reason: reason, action: action) } else { action() }
     }
 
     // MARK: Files
@@ -165,6 +191,9 @@ final class SyncService {
         stored = Stored()
         UserDefaults.standard.removeObject(forKey: Self.stateKey)
         email = nil; profiles = []; activeProfileID = nil; meta = [:]; queue = [:]; pending = 0; lastSync = nil; lastError = nil
+        pinRequest = nil
+        showPicker = false
+        applyKidsPolicy()
     }
 
     // MARK: Profiles
@@ -176,26 +205,28 @@ final class SyncService {
             profiles = list
             saveStored()
             if activeProfileID != nil && activeProfile == nil { activeProfileID = nil }       // the profile was deleted elsewhere
+            applyKidsPolicy()
             return list
         } catch let e as SyncError where e.status == 0 && !profiles.isEmpty {
+            applyKidsPolicy()
             return profiles                                                                      // offline: use the last known list
         }
     }
 
-    func createProfile(name: String, avatar: String) async throws {
+    func createProfile(name: String, avatar: String, kids: Bool = false, maxRating: MaturityRating = .pg, pin: String? = nil) async throws {
         let color = Avatars.find(avatar).map { String(format: "#%06x", $0.top) } ?? "#3e63dd"
-        _ = try await guarded { try await api().createProfile(name: name, avatar: avatar, color: color) }
+        _ = try await guarded { try await api().createProfile(name: name, avatar: avatar, color: color, kids: kids, maxRating: kids ? maxRating.code : nil, pin: pin) }
         try await loadProfiles()
     }
 
-    func updateProfile(_ p: SyncProfile, name: String, avatar: String) async throws {
+    func updateProfile(_ p: SyncProfile, name: String, avatar: String, kids: Bool, maxRating: MaturityRating, pin: PinChange) async throws {
         let color = Avatars.find(avatar).map { String(format: "#%06x", $0.top) } ?? p.color
-        _ = try await guarded { try await api().updateProfile(id: p.id, name: name, avatar: avatar, color: color) }
+        _ = try await guarded { try await api().updateProfile(id: p.id, name: name, avatar: avatar, color: color, kids: kids, maxRating: kids ? maxRating.code : nil, pin: pin) }
         try await loadProfiles()
     }
 
-    func deleteProfile(_ p: SyncProfile) async throws {
-        try await guarded { try await api().deleteProfile(id: p.id) }
+    func deleteProfile(_ p: SyncProfile, pin: String? = nil) async throws {
+        try await guarded { try await api().deleteProfile(id: p.id, pin: pin) }
         Library.removeData(for: p.id)
         try? FileManager.default.removeItem(at: Self.file("meta", p.id))
         try? FileManager.default.removeItem(at: Self.file("queue", p.id))
@@ -203,10 +234,15 @@ final class SyncService {
         try await loadProfiles()
     }
 
+    func verifyPin(_ p: SyncProfile, _ pin: String) async throws {
+        try await guarded { try await api().verifyPin(id: p.id, pin: pin) }
+    }
+
     /// Makes a profile the one this phone shows, loads its data and catches up with the server.
     func select(_ p: SyncProfile) async {
         activeProfileID = p.id
         saveStored()
+        applyKidsPolicy()
         library.useNamespace(p.id)
         loadQueue(for: p.id)
         startPolling()

@@ -5,6 +5,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Long-press a Continue Watching card to mark the title watched or remove it from the row; single episodes can be marked watched or not
+- Kids profiles with a maximum rating (G, PG, PG-13), a content filter built on US ratings, and an optional 4 to 6 digit PIN; a PIN-protected
+  kids profile asks for it before the person switches profile, signs out or opens Settings
+- Thumbs up and thumbs down on title pages (synced as `rating` items) and up to two "Because you watched" rows on Home
+- Chromecast: a Cast button on Home and in the player; what you play goes to the TV and the phone becomes its remote (seek, play/pause, volume, subtitles, next episode). MEGA files and other links are served to the TV from the phone. AirPlay button in the player for normal video links
+
 ## [1.0.0] - 2026-11-02
 
 First public release.

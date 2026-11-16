@@ -12,13 +12,26 @@ struct PlayerScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var subtitles = SubtitleController()
     @State private var showSubtitles = false
+    @State private var cast = CastManager.shared
+    /// True while the video plays on the TV and this screen is its remote.
+    @State private var casting = false
+    /// The user chose to watch on the phone although a TV is connected.
+    @State private var localOnly = false
+    @State private var track = PositionTrack()
 
-    enum Phase { case resolving, video(URL), mega(MegaDownload), page(URL), failed(String) }
+    /// The playing position, kept outside @State so its quarter-second updates do not redraw the screen.
+    final class PositionTrack { var position = 0.0 }
+
+    /// `local` is the file as a plain web address served by this phone, which is what lets AirPlay play a MEGA file; without it the player decrypts in-app.
+    enum Phase { case resolving, video(URL), mega(MegaDownload, local: URL?), page(URL), failed(String) }
     @State private var phase: Phase = .resolving
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
+            if casting {
+                CastRemoteView(request: request, cast: cast, onLocal: watchOnPhone)
+            } else {
             switch phase {
             case .resolving:
                 VStack(spacing: 14) {
@@ -28,11 +41,13 @@ struct PlayerScreen: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .video(let url):
-                VideoPlayerView(subtitles: subtitles, url: url, resume: request.resume, onProgress: save, onClock: { subtitles.setClock(position: $0, paused: $1) }, onEnd: ended)
+                VideoPlayerView(subtitles: subtitles, url: url, resume: request.resume, onProgress: save, onClock: { subtitles.setClock(position: $0, paused: $1); track.position = $0 }, onEnd: ended)
                     .ignoresSafeArea()
                     .id(request.id)
-            case .mega(let dl):
-                VideoPlayerView(subtitles: subtitles, url: dl.url, mega: dl, resume: 0, onProgress: { _, _ in }, onClock: { _, _ in }, onEnd: ended)
+            case .mega(let dl, let local):
+                VideoPlayerView(subtitles: subtitles, url: local ?? dl.url, mega: local == nil ? dl : nil, resume: request.resume, onProgress: { _, _ in },
+                                onClock: { p, _ in track.position = p }, onEnd: ended,
+                                onFail: local == nil ? nil : { phase = .mega(dl, local: nil) })
                     .ignoresSafeArea()
                     .id(request.id)
             case .page(let url):
@@ -49,8 +64,9 @@ struct PlayerScreen: View {
                 .padding(40)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            }
 
-            if !isNativeVideo { SubtitleOverlay(controller: subtitles) }
+            if !isNativeVideo && !casting { SubtitleOverlay(controller: subtitles) }
 
             HStack {
                 Button { dismiss() } label: {
@@ -62,6 +78,12 @@ struct PlayerScreen: View {
                 .buttonBorderShape(.circle)
                 .accessibilityLabel("Close")
                 Spacer()
+                if (isNativeVideo || casting), cast.hasDevices || cast.hasSession {
+                    PlayerControl { CastButton() }.accessibilityLabel("Cast")
+                }
+                if airPlayable, !casting {
+                    PlayerControl { AirPlayButton() }.accessibilityLabel("AirPlay")
+                }
                 if settings.hasSubDL, !isFailed, !request.isCustom {
                     Button { showSubtitles = true } label: {
                         Image(systemName: subtitles.isOn ? "captions.bubble.fill" : "captions.bubble")
@@ -80,6 +102,74 @@ struct PlayerScreen: View {
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
         .task(id: request.id) { await resolve() }
+        .onChange(of: cast.hasSession) { _, connected in
+            if connected { if !casting { startCasting() } } else if casting { backToPhone() }
+        }
+        .onChange(of: cast.isCasting) { _, on in
+            // The TV could not load or play the video: carry on here, from where it got to.
+            if !on, casting { localOnly = true; backToPhone() }
+        }
+        .onChange(of: Int(cast.position / 5)) { _, _ in
+            if casting, cast.duration > 0 { save(position: cast.position, duration: cast.duration) }
+        }
+        .onChange(of: subtitles.name) { _, _ in
+            if casting { Task { await cast.updateCaptions(captionText) } }
+        }
+        .onDisappear {
+            CastProxy.shared.stop()
+            guard casting else { return }
+            if cast.duration > 0 { save(position: cast.position, duration: cast.duration) }
+            cast.stopPlayback()
+        }
+    }
+
+    private var captionText: String? { subtitles.isOn ? CastProxy.webVTT(cues: subtitles.cues, offset: subtitles.offset) : nil }
+
+    /// With a TV connected, what plays goes to the TV and this screen becomes its remote.
+    private func startCasting() {
+        guard !localOnly, cast.hasSession else { return }
+        let source: CastProxy.Source
+        switch phase {
+        case .video(let url): source = .url(url)
+        case .mega(let download, _): source = .mega(download)
+        default: return
+        }
+        let resume = track.position > 5 ? track.position : request.resume
+        casting = true
+        cast.onFinished = { duration in
+            casting = false
+            track.position = 0
+            if duration > 0 { save(position: duration, duration: duration) }
+            ended()
+        }
+        let media = CastManager.Media(source: source, title: request.title, subtitle: request.subtitle,
+                                      artwork: TMDB.image(request.backdropPath ?? request.posterPath, "w780"))
+        let captions = captionText
+        Task { await cast.load(media, resume: resume, captions: captions) }
+    }
+
+    /// Back to the phone's own player at the TV's position.
+    private func backToPhone() {
+        request.resume = cast.position
+        track.position = cast.position
+        casting = false
+    }
+
+    private func watchOnPhone() {
+        localOnly = true
+        let at = cast.position
+        cast.stopPlayback()
+        request.resume = at
+        track.position = at
+        casting = false
+    }
+
+    private var airPlayable: Bool {
+        switch phase {
+        case .video: true
+        case .mega(_, let local): local != nil
+        default: false
+        }
     }
 
     private var isNativeVideo: Bool { switch phase { case .video, .mega: true; default: false } }
@@ -95,11 +185,15 @@ struct PlayerScreen: View {
     }
 
     private func resolve() async {
+        casting = false
+        track.position = request.resume
         phase = .resolving
         loadSavedSubtitle()
         do {
             if let m = request.mega {
-                phase = .mega(try await megaDownload(m))
+                let download = try await megaDownload(m)
+                phase = .mega(download, local: await CastProxy.shared.publish(.mega(download)))
+                startCasting()
                 return
             }
             let found: Playback
@@ -109,6 +203,7 @@ struct PlayerScreen: View {
             case .video(let url): phase = .video(url)
             case .page(let url): phase = .page(url)
             }
+            startCasting()
             // A page without progress reporting still counts as "started" for Continue Watching.
             if !request.isCustom, library.progress(for: request.ref) == nil || request.ref.type == .tv {
                 save(position: request.resume, duration: 0, initial: true)
@@ -186,6 +281,7 @@ struct VideoPlayerView: UIViewControllerRepresentable {
     let onProgress: (Double, Double) -> Void
     let onClock: (Double, Bool) -> Void
     let onEnd: () -> Void
+    var onFail: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -243,6 +339,7 @@ struct VideoPlayerView: UIViewControllerRepresentable {
 
             statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 Task { @MainActor in
+                    if item.status == .failed { self?.parent.onFail?(); return }
                     guard let self, item.status == .readyToPlay, !self.didSeek else { return }
                     self.didSeek = true
                     let duration = item.duration.seconds

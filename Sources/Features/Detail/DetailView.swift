@@ -14,11 +14,14 @@ struct DetailView: View {
     @State private var episodes: [Episode] = []
     @State private var loadingEpisodes = false
     @State private var expanded = false
+    @State private var blocked = false
 
     var body: some View {
         ScrollView {
             if let d = details {
                 content(d)
+            } else if blocked {
+                EmptyState(title: "Not available on this profile", message: "This title is outside the age limit set for this profile.", systemImage: "hand.raised")
             } else if let error {
                 EmptyState(title: "Couldn't load this title", message: error, systemImage: "exclamationmark.triangle")
             } else {
@@ -29,9 +32,11 @@ struct DetailView: View {
         .ignoresSafeArea(edges: .top)
         .toolbarBackground(.hidden, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: ref) { await load() }
+        .task(id: LoadKey(ref: ref, policy: settings.kidsPolicy)) { await load() }
         .task { await catalog.refresh(settings) }
     }
+
+    private struct LoadKey: Hashable { let ref: MediaRef; let policy: KidsPolicy? }
 
     // MARK: Layout
 
@@ -73,6 +78,20 @@ struct DetailView: View {
                     if let key = d.trailerKey {
                         ActionButton(title: "Trailer", systemImage: "film") { presenter.playTrailer(key) }
                     }
+                    ActionButton(title: "Like", systemImage: library.rating(for: ref) == 1 ? "hand.thumbsup.fill" : "hand.thumbsup",
+                                 active: library.rating(for: ref) == 1) {
+                        library.setRating(item, 1)
+                    }
+                    .accessibilityLabel("Thumbs up")
+                    .accessibilityValue(library.rating(for: ref) == 1 ? "Selected" : "")
+                    .accessibilityIdentifier("thumbs-up")
+                    ActionButton(title: "Dislike", systemImage: library.rating(for: ref) == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown",
+                                 active: library.rating(for: ref) == -1) {
+                        library.setRating(item, -1)
+                    }
+                    .accessibilityLabel("Thumbs down")
+                    .accessibilityValue(library.rating(for: ref) == -1 ? "Selected" : "")
+                    .accessibilityIdentifier("thumbs-down")
                     ShareLink(item: URL(string: "https://www.themoviedb.org/\(ref.type.rawValue)/\(ref.id)")!) {
                         VStack(spacing: 6) {
                             Image(systemName: "square.and.arrow.up").font(.system(size: 21)).frame(height: 24)
@@ -268,6 +287,8 @@ struct DetailView: View {
     // MARK: Data
 
     private func load() async {
+        blocked = false
+        error = nil
         do {
             let d = try await settings.tmdb.details(ref)
             if let p = library.progress(for: ref), let s = p.season, d.seasons.contains(where: { $0.seasonNumber == s }) {
@@ -276,6 +297,9 @@ struct DetailView: View {
                 season = d.seasons.first?.seasonNumber ?? 1
             }
             withAnimation(.easeOut(duration: 0.3)) { details = d }
+        } catch TMDB.Failure.blocked {
+            details = nil
+            blocked = true
         } catch {
             self.error = error.localizedDescription
         }
@@ -293,41 +317,62 @@ private struct EpisodeRow: View {
         let watched = library.episodeWatched(show: show.id, season: season, episode: episode.episodeNumber)
         let p = library.progress(for: show.ref)
         let current = p?.season == season && p?.episode == episode.episodeNumber && p?.finished == false
-        Button(action: onPlay) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    ArtworkBox(url: TMDB.image(episode.stillPath ?? show.backdropPath, "w300"), ratio: 16 / 9, corner: 5)
-                        .frame(width: 136)
-                        .overlay {
-                            Image(systemName: "play.fill").font(.system(size: 13)).foregroundStyle(.white)
-                                .frame(width: 32, height: 32).background(.black.opacity(0.5), in: Circle())
-                        }
-                        .overlay(alignment: .bottom) {
-                            if current, let p, p.fraction > 0 {
-                                GeometryReader { g in
-                                    Rectangle().fill(Theme.accent).frame(width: g.size.width * p.fraction)
-                                }
-                                .frame(height: 3)
+        ZStack(alignment: .topTrailing) {
+            Button(action: onPlay) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        ArtworkBox(url: TMDB.image(episode.stillPath ?? show.backdropPath, "w300"), ratio: 16 / 9, corner: 5)
+                            .frame(width: 136)
+                            .overlay {
+                                Image(systemName: "play.fill").font(.system(size: 13)).foregroundStyle(.white)
+                                    .frame(width: 32, height: 32).background(.black.opacity(0.5), in: Circle())
                             }
+                            .overlay(alignment: .bottom) {
+                                if current, let p, p.fraction > 0 {
+                                    GeometryReader { g in
+                                        Rectangle().fill(Theme.accent).frame(width: g.size.width * p.fraction)
+                                    }
+                                    .frame(height: 3)
+                                }
+                            }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(episode.episodeNumber). \(episode.name ?? "Episode \(episode.episodeNumber)")")
+                                .font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                            Text([episode.runtime.map { "\($0)m" }, episode.airDate].compactMap { $0 }.joined(separator: " \u{00B7} "))
+                                .font(.system(size: 12)).foregroundStyle(Theme.dim)
                         }
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(episode.episodeNumber). \(episode.name ?? "Episode \(episode.episodeNumber)")")
-                            .font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                        Text([episode.runtime.map { "\($0)m" }, episode.airDate].compactMap { $0 }.joined(separator: " \u{00B7} "))
-                            .font(.system(size: 12)).foregroundStyle(Theme.dim)
+                        Spacer(minLength: 44)
                     }
-                    Spacer(minLength: 0)
-                    if watched {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.text2)
+                    if let o = episode.overview, !o.isEmpty {
+                        Text(o).font(.system(size: 13)).foregroundStyle(Theme.dim).lineLimit(3)
                     }
                 }
-                if let o = episode.overview, !o.isEmpty {
-                    Text(o).font(.system(size: 13)).foregroundStyle(Theme.dim).lineLimit(3)
+                .opacity(watched ? 0.6 : 1)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("episode-\(episode.episodeNumber)")
+            .contextMenu {
+                Button { toggle(!watched) } label: {
+                    Label(watched ? "Mark as not watched" : "Mark as watched", systemImage: watched ? "eye.slash" : "checkmark.circle")
                 }
             }
-            .opacity(watched ? 0.6 : 1)
-            .contentShape(Rectangle())
+
+            Button { toggle(!watched) } label: {
+                Image(systemName: watched ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(watched ? .white : Theme.dim)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(watched ? "Mark episode \(episode.episodeNumber) as not watched" : "Mark episode \(episode.episodeNumber) as watched")
+            .accessibilityValue(watched ? "Watched" : "Not watched")
+            .accessibilityIdentifier("episode-watched-\(episode.episodeNumber)")
         }
-        .buttonStyle(.plain)
+    }
+
+    private func toggle(_ on: Bool) {
+        library.setEpisodeWatched(show: show.id, season: season, episode: episode.episodeNumber, on)
     }
 }

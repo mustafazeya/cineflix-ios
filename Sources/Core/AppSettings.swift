@@ -25,6 +25,8 @@ final class AppSettings {
     var subLangs: String { didSet { save("subLangs", subLangs) } }
     var syncServer: String { didSet { save("syncServer", syncServer) } }
     var hideWatched: Bool { didSet { defaults.set(hideWatched, forKey: "cf.hideWatched") } }
+    /// Set by the sync layer while a kids profile is active. Not saved: it follows the profile.
+    var kidsPolicy: KidsPolicy?
 
     init() {
         let defaults = UserDefaults.standard
@@ -45,7 +47,7 @@ final class AppSettings {
 
     private func save(_ key: String, _ value: String) { defaults.set(value, forKey: "cf." + key) }
 
-    var tmdb: TMDB { TMDB(token: tmdbToken.trimmingCharacters(in: .whitespacesAndNewlines), language: language, region: region) }
+    var tmdb: TMDB { TMDB(token: tmdbToken.trimmingCharacters(in: .whitespacesAndNewlines), language: language, region: region, kids: kidsPolicy) }
     var server: MediaServer { MediaServer(streamBase: streamBase, catalogBase: catalogBase, token: serverToken, streamType: streamType) }
     var hasTMDB: Bool { !tmdbToken.trimmingCharacters(in: .whitespaces).isEmpty }
     var hasSubDL: Bool { !subdlKey.trimmingCharacters(in: .whitespaces).isEmpty }

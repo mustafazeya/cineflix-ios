@@ -187,6 +187,62 @@ struct ContinueCard: View {
     }
 }
 
+/// Long-press menu (and VoiceOver actions) for a Continue Watching card: mark the title watched, or just take it off the row.
+struct ContinueWatchingActions: ViewModifier {
+    let progress: WatchProgress
+    @Environment(Library.self) private var library
+
+    func body(content: Content) -> some View {
+        content
+            .contextMenu {
+                Button { library.markWatched(progress) } label: { Label("Mark as watched", systemImage: "checkmark.circle") }
+                Button(role: .destructive) { library.removeProgress(progress.ref) } label: {
+                    Label("Remove from Continue Watching", systemImage: "xmark.circle")
+                }
+                NavigationLink(value: Route.title(progress.ref)) { Label("Details", systemImage: "info.circle") }
+            }
+            .accessibilityAction(named: "Mark as watched") { library.markWatched(progress) }
+            .accessibilityAction(named: "Remove from Continue Watching") { library.removeProgress(progress.ref) }
+    }
+}
+
+extension View {
+    func continueWatchingActions(_ progress: WatchProgress) -> some View { modifier(ContinueWatchingActions(progress: progress)) }
+}
+
+/// The Continue Watching row. A kids profile only lists titles that still pass its limit, so a changed rating limit also covers
+/// what was started before; nothing shows until the check is done.
+struct ContinueWatchingRow: View {
+    var cardWidth: CGFloat = 250
+    var idPrefix = "continue"
+
+    @Environment(AppSettings.self) private var settings
+    @Environment(Library.self) private var library
+    @Environment(PlayerPresenter.self) private var presenter
+    @Environment(KidsVisibility.self) private var visibility
+
+    var body: some View {
+        let shown = settings.kidsPolicy == nil ? library.continueWatching : library.continueWatching.filter { visibility.allowed.contains($0.ref) }
+        if !shown.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                RowHeader(title: "Continue Watching")
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 10) {
+                        ForEach(shown, id: \.ref) { p in
+                            Button { presenter.resume(p, settings: settings) } label: { ContinueCard(progress: p, width: cardWidth) }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("\(idPrefix)-\(p.ref.key)")
+                                .continueWatchingActions(p)
+                        }
+                    }
+                }
+                .contentMargins(.horizontal, 16, for: .scrollContent)
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+}
+
 // MARK: - Rows
 
 enum RowStyle { case poster, landscape, top10 }

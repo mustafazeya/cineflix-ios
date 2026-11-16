@@ -17,14 +17,16 @@ The LG TV version lives in [cineflix-webos](https://github.com/mustafazeya/cinef
 - **Title page**: logo, rating, runtime, age rating, Play or Resume, My List, Mark watched, Trailer, Share, seasons and episodes (watched checks and progress), cast (tap to browse by actor), More Like This
 - **Browse**: movies or TV, sort, genre, year or decade, actor, minimum rating, hide watched, endless scrolling
 - **Search** with trending suggestions
-- **My Stuff**: Continue Watching, My List, Already Watched, Settings
+- **My Stuff**: Continue Watching (long-press to mark watched or remove), My List, Already Watched, Settings
+- **Profiles**: kids profiles with a maximum rating and a PIN, thumbs up or down on titles, and "Because you watched" rows on Home
 - **Player**: native AVPlayer for MP4 and HLS with resume, Picture in Picture, AirPlay and auto next episode, or an in-app web view for servers that return their own player page
+- **Casting**: Chromecast from the Home screen or the player (the phone is the remote, MEGA files included) and AirPlay for normal video links
 - **Subtitle search** from SubDL for the exact movie or episode, kept in step with the real video clock ([details](docs/subtitles.md))
 - Everything personal (list, progress, settings) is stored on the device only
 
 ## Requirements
 
-- A Mac with **Xcode 27** and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+- A Mac with **Xcode 27** [XcodeGen](https://github.com/yonaskolb/XcodeGen) and [CocoaPods](https://cocoapods.org) (`brew install xcodegen cocoapods`)
 - An iPhone on **iOS 26 or later**, and an Apple ID (a free personal team is enough to run on your own device)
 - A free [TMDB](https://www.themoviedb.org/settings/api) API read access token
 - A media server that follows the [server contract](https://github.com/mustafazeya/cineflix-webos/blob/main/docs/media-server-api.md)

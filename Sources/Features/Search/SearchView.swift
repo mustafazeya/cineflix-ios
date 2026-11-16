@@ -52,32 +52,22 @@ struct MyStuffView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(Library.self) private var library
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(SyncService.self) private var sync
     @State private var section: Section = .list
     @State private var showSettings = false
+
+    /// My Videos holds links that are not rated, so a kids profile does not get it.
+    private var sections: [Section] { settings.kidsPolicy == nil ? Section.allCases : [.list, .watched] }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 AccountCard()
 
-                if !library.continueWatching.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        RowHeader(title: "Continue Watching")
-                        ScrollView(.horizontal) {
-                            LazyHStack(spacing: 10) {
-                                ForEach(library.continueWatching, id: \.ref) { p in
-                                    Button { presenter.resume(p, settings: settings) } label: { ContinueCard(progress: p, width: 220) }
-                                        .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                        .contentMargins(.horizontal, 16, for: .scrollContent)
-                        .scrollIndicators(.hidden)
-                    }
-                }
+                ContinueWatchingRow(cardWidth: 220, idPrefix: "mystuff-continue")
 
                 Picker("Section", selection: $section) {
-                    ForEach(Section.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach(sections, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
@@ -98,7 +88,7 @@ struct MyStuffView: View {
                         PosterGrid(items: library.watchedItems)
                     }
                 case .videos:
-                    VideosSection()
+                    if settings.kidsPolicy == nil { VideosSection() }
                 }
             }
             .padding(.vertical, 8)
@@ -107,7 +97,8 @@ struct MyStuffView: View {
         .navigationTitle("My Stuff")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                Button { sync.guardLeaving("Enter the PIN to open Settings.") { showSettings = true } } label: { Image(systemName: "gearshape") }
+                    .accessibilityIdentifier("settings-button")
             }
         }
         .sheet(isPresented: $showSettings) { NavigationStack { SettingsView() } }

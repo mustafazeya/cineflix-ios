@@ -15,6 +15,13 @@ struct SyncProfile: Codable, Identifiable, Hashable, Sendable {
     var position: Int
 }
 
+/// What to do with a profile's PIN when saving it. Changing or removing an existing PIN needs the current one.
+enum PinChange: Sendable {
+    case keep
+    case set(String, current: String?)
+    case remove(current: String)
+}
+
 struct SyncChange: Codable, Hashable, Sendable {
     var kind: String
     var key: String
@@ -139,13 +146,33 @@ struct SyncAPI: Sendable {
 
     // Profiles
     func profiles() async throws -> [SyncProfile] { let r: ProfilesResponse = try await request("GET", "/v1/profiles"); return r.profiles }
-    func createProfile(name: String, avatar: String, color: String) async throws -> SyncProfile {
-        try await request("POST", "/v1/profiles", body: ["name": .string(name), "avatar": .string(avatar), "color": .string(color)])
+    func createProfile(name: String, avatar: String, color: String, kids: Bool, maxRating: String?, pin: String?) async throws -> SyncProfile {
+        var body: [String: JSONValue] = ["name": .string(name), "avatar": .string(avatar), "color": .string(color), "kids": .bool(kids)]
+        if kids, let maxRating { body["maxRating"] = .string(maxRating) }
+        if let pin { body["pin"] = .string(pin) }
+        return try await request("POST", "/v1/profiles", body: body)
     }
-    func updateProfile(id: String, name: String, avatar: String, color: String) async throws -> SyncProfile {
-        try await request("PATCH", "/v1/profiles/\(id)", body: ["name": .string(name), "avatar": .string(avatar), "color": .string(color)])
+    func updateProfile(id: String, name: String, avatar: String, color: String, kids: Bool, maxRating: String?, pin: PinChange) async throws -> SyncProfile {
+        var body: [String: JSONValue] = ["name": .string(name), "avatar": .string(avatar), "color": .string(color), "kids": .bool(kids)]
+        if kids, let maxRating { body["maxRating"] = .string(maxRating) }
+        switch pin {
+        case .keep: break
+        case .set(let new, let current):
+            body["pin"] = .string(new)
+            if let current { body["currentPin"] = .string(current) }
+        case .remove(let current):
+            body["pin"] = .null
+            body["currentPin"] = .string(current)
+        }
+        return try await request("PATCH", "/v1/profiles/\(id)", body: body)
     }
-    func deleteProfile(id: String) async throws { let _: Empty = try await request("DELETE", "/v1/profiles/\(id)", body: [:]) }
+    func deleteProfile(id: String, pin: String?) async throws {
+        let _: Empty = try await request("DELETE", "/v1/profiles/\(id)", body: pin.map { ["pin": .string($0)] } ?? [:])
+    }
+    /// Succeeds when the PIN is right. A wrong PIN is a 403 "bad_pin"; too many wrong ones is a 429.
+    func verifyPin(id: String, pin: String) async throws {
+        let _: Empty = try await request("POST", "/v1/profiles/\(id)/verify-pin", body: ["pin": .string(pin)])
+    }
 
     // Sync
     func pull(profile: String, since: Int) async throws -> PullResponse { try await request("GET", "/v1/profiles/\(profile)/sync?since=\(since)") }

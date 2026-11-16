@@ -14,8 +14,12 @@ struct ProfilePickerView: View {
     @State private var loadingID: String?
     @State private var errorText: String?
     @State private var offerImport: SyncProfile?
+    @State private var pinTarget: PinTarget?
+    @State private var pinPassed: (target: PinTarget, pin: String)?
 
-    struct EditTarget: Identifiable { let id = UUID(); let profile: SyncProfile? }
+    /// `profile` is nil when adding. `pin` is the PIN already confirmed for it, needed to change or delete a PIN-protected profile.
+    struct EditTarget: Identifiable { let id = UUID(); let profile: SyncProfile?; var pin: String? = nil }
+    struct PinTarget: Identifiable { let id = UUID(); let profile: SyncProfile; let managing: Bool }
 
     private let columns = [GridItem(.adaptive(minimum: 130, maximum: 160), spacing: 26, alignment: .top)]
 
@@ -70,7 +74,12 @@ struct ProfilePickerView: View {
         }
         .task { _ = try? await sync.loadProfiles() }
         .sheet(item: $editing) { target in
-            ProfileEditorView(profile: target.profile)
+            ProfileEditorView(profile: target.profile, currentPin: target.pin)
+        }
+        .sheet(item: $pinTarget, onDismiss: afterPin) { target in
+            PinPromptView(profile: target.profile, reason: target.managing ? "This profile is protected. Enter its PIN to change it." : nil) { pin in
+                pinPassed = (target, pin)
+            }
         }
         .alert("Add what is on this phone?", isPresented: Binding(get: { offerImport != nil }, set: { if !$0 { offerImport = nil } })) {
             Button("Add it") { Task { await sync.importGuestData(); finish() } }
@@ -93,12 +102,27 @@ struct ProfilePickerView: View {
                     }
                     if loadingID == p.id { ProgressView().controlSize(.large) }
                 }
+                .overlay(alignment: .bottom) {
+                    if p.kids {
+                        Text("KIDS")
+                            .font(.system(size: 11, weight: .heavy)).tracking(1.2)
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(.white, in: Capsule())
+                            .offset(y: 9)
+                    }
+                }
                 .shadow(color: .black.opacity(0.5), radius: 10, y: 6)
-            Text(p.name)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(p.id == sync.activeProfileID ? .white : Theme.text2)
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                if p.hasPin { Image(systemName: "lock.fill").font(.system(size: 12, weight: .semibold)) }
+                Text(p.name).lineLimit(1)
+            }
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(p.id == sync.activeProfileID ? .white : Theme.text2)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(p.name)
+        .accessibilityValue([p.kids ? "Kids" : nil, p.hasPin ? "PIN protected" : nil].compactMap { $0 }.joined(separator: ", "))
     }
 
     private var addTile: some View {
@@ -113,8 +137,24 @@ struct ProfilePickerView: View {
     }
 
     private func tap(_ p: SyncProfile) {
-        if managing { editing = EditTarget(profile: p); return }
         errorText = nil
+        if p.hasPin && (managing || (!p.kids && p.id != sync.activeProfileID)) {
+            pinTarget = PinTarget(profile: p, managing: managing)
+        } else if managing {
+            editing = EditTarget(profile: p)
+        } else {
+            choose(p)
+        }
+    }
+
+    /// Runs after the PIN sheet has gone, so the next sheet does not fight its dismissal.
+    private func afterPin() {
+        guard let passed = pinPassed else { return }
+        pinPassed = nil
+        if passed.target.managing { editing = EditTarget(profile: passed.target.profile, pin: passed.pin) } else { choose(passed.target.profile) }
+    }
+
+    private func choose(_ p: SyncProfile) {
         loadingID = p.id
         Task {
             await sync.select(p)
@@ -133,6 +173,8 @@ struct ProfilePickerView: View {
 
 struct ProfileEditorView: View {
     let profile: SyncProfile?
+    /// The PIN of a PIN-protected profile, already confirmed by the picker. Needed to change or remove the PIN and to delete the profile.
+    var currentPin: String?
 
     @Environment(SyncService.self) private var sync
     @Environment(\.dismiss) private var dismiss
@@ -142,6 +184,22 @@ struct ProfileEditorView: View {
     @State private var busy = false
     @State private var errorText: String?
     @State private var confirmDelete = false
+    @State private var kids = false
+    @State private var maxRating: MaturityRating = .pg
+    @State private var pinMode: PinMode = .unchanged
+    @State private var newPin = ""
+    @State private var repeatPin = ""
+
+    private enum PinMode { case unchanged, set, remove }
+
+    private var hasPin: Bool { profile?.hasPin == true }
+    private var pinValid: Bool {
+        switch pinMode {
+        case .unchanged, .remove: true
+        case .set: newPin.count >= 4 && newPin == repeatPin
+        }
+    }
+    private var ratingChoices: [MaturityRating] { maxRating == .r ? MaturityRating.selectable + [.r] : MaturityRating.selectable }
 
     var body: some View {
         NavigationStack {
@@ -177,7 +235,10 @@ struct ProfileEditorView: View {
                     }
                     .padding(.horizontal, 20)
 
-                    if let errorText { Text(errorText).font(.footnote).foregroundStyle(Theme.accent) }
+                    kidsSection
+                    pinSection
+
+                    if let errorText { Text(errorText).font(.footnote).foregroundStyle(Theme.accent).padding(.horizontal, 20) }
 
                     if profile != nil, sync.profiles.count > 1 {
                         Button("Delete profile", role: .destructive) { confirmDelete = true }
@@ -192,7 +253,7 @@ struct ProfileEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button { Task { await save() } } label: { if busy { ProgressView() } else { Text("Save").fontWeight(.semibold) } }
-                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || !pinValid || busy)
                         .accessibilityIdentifier("profile-save")
                 }
             }
@@ -206,9 +267,73 @@ struct ProfileEditorView: View {
         .onAppear {
             guard avatar.isEmpty else { return }
             name = profile?.name ?? ""
+            kids = profile?.kids ?? false
+            maxRating = MaturityRating(code: profile?.maxRating) ?? .pg
             avatar = profile.flatMap { Avatars.find($0.avatar) != nil ? $0.avatar : nil } ?? Avatars.nextFree(sync.profiles.map(\.avatar))
         }
         .presentationBackground(Theme.bg)
+    }
+
+    // MARK: Kids and PIN
+
+    private var kidsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: $kids.animation(.easeOut(duration: 0.2))) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Kids profile").font(.system(size: 17, weight: .semibold))
+                    Text("Only shows titles rated up to the level you choose.").font(.system(size: 13)).foregroundStyle(Theme.dim)
+                }
+            }
+            .accessibilityIdentifier("kids-toggle")
+            if kids {
+                Picker("Maximum rating", selection: $maxRating) {
+                    ForEach(ratingChoices, id: \.self) { Text($0.code).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("max-rating")
+                Text("Titles without a US rating are hidden from kids profiles. Leaving a kids profile asks for its PIN when it has one.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.dim)
+            }
+        }
+        .padding(16)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 20)
+    }
+
+    private var pinSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(hasPin && pinMode != .remove ? "PIN protected" : "PIN", systemImage: hasPin && pinMode != .remove ? "lock.fill" : "lock.open")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                if hasPin && pinMode == .unchanged {
+                    Button("Change") { pinMode = .set }.accessibilityIdentifier("pin-change")
+                    Button("Remove", role: .destructive) { pinMode = .remove }.accessibilityIdentifier("pin-remove")
+                } else if hasPin {
+                    Button("Cancel") { pinMode = .unchanged; newPin = ""; repeatPin = "" }.accessibilityIdentifier("pin-undo")
+                }
+            }
+            .font(.system(size: 15))
+            if pinMode == .remove {
+                Text("The PIN is removed when you save.").font(.system(size: 13)).foregroundStyle(Theme.dim)
+            } else if hasPin && pinMode == .unchanged {
+                Text("Asked when this profile is chosen, or when it is changed or left.").font(.system(size: 13)).foregroundStyle(Theme.dim)
+            } else {
+                PinField(title: hasPin ? "New PIN (4 to 6 digits)" : "PIN (4 to 6 digits, optional)", text: $newPin, identifier: "pin-new")
+                    .onChange(of: newPin) { _, v in if !hasPin { pinMode = v.isEmpty ? .unchanged : .set } }
+                if !newPin.isEmpty {
+                    PinField(title: "Repeat PIN", text: $repeatPin, identifier: "pin-repeat")
+                    if !repeatPin.isEmpty && repeatPin != newPin {
+                        Text("The PINs do not match.").font(.system(size: 13)).foregroundStyle(Theme.accent)
+                    } else if newPin.count < 4 {
+                        Text("A PIN has 4 to 6 digits.").font(.system(size: 13)).foregroundStyle(Theme.dim)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 20)
     }
 
     private func save() async {
@@ -216,15 +341,23 @@ struct ProfileEditorView: View {
         defer { busy = false }
         do {
             let n = name.trimmingCharacters(in: .whitespaces)
-            if let profile { try await sync.updateProfile(profile, name: n, avatar: avatar) }
-            else { try await sync.createProfile(name: n, avatar: avatar) }
+            if let profile {
+                let change: PinChange = switch pinMode {
+                case .unchanged: .keep
+                case .set: .set(newPin, current: profile.hasPin ? currentPin : nil)
+                case .remove: .remove(current: currentPin ?? "")
+                }
+                try await sync.updateProfile(profile, name: n, avatar: avatar, kids: kids, maxRating: maxRating, pin: change)
+            } else {
+                try await sync.createProfile(name: n, avatar: avatar, kids: kids, maxRating: maxRating, pin: pinMode == .set ? newPin : nil)
+            }
             dismiss()
         } catch { errorText = error.localizedDescription }
     }
 
     private func remove() async {
         guard let profile else { return }
-        do { try await sync.deleteProfile(profile); dismiss() } catch { errorText = error.localizedDescription }
+        do { try await sync.deleteProfile(profile, pin: currentPin); dismiss() } catch { errorText = error.localizedDescription }
     }
 }
 

@@ -22,6 +22,13 @@ struct SavedVideo: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// A thumbs up (1) or thumbs down (-1) on a title.
+struct RatedItem: Codable, Hashable, Sendable {
+    var item: MediaItem
+    var value: Int
+    var date: Date
+}
+
 struct WatchProgress: Codable, Hashable, Sendable {
     var ref: MediaRef
     var season: Int?
@@ -48,6 +55,7 @@ final class Library {
     private(set) var progress: [String: WatchProgress] = [:]
     private(set) var episodesWatched: Set<String> = []
     private(set) var videos: [SavedVideo] = []
+    private(set) var ratings: [String: RatedItem] = [:]
 
     /// nil = guest data, otherwise the signed-in profile whose file is loaded.
     private(set) var namespace: String?
@@ -61,6 +69,7 @@ final class Library {
         var progress: [String: WatchProgress]
         var episodesWatched: Set<String>
         var videos: [SavedVideo]?
+        var ratings: [String: RatedItem]?
     }
 
     private static let directory: URL = {
@@ -85,7 +94,7 @@ final class Library {
     }
 
     private func load() {
-        myList = []; watched = [:]; progress = [:]; episodesWatched = []; videos = []
+        myList = []; watched = [:]; progress = [:]; episodesWatched = []; videos = []; ratings = [:]
         guard let data = try? Data(contentsOf: fileURL),
               let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         myList = s.myList
@@ -93,10 +102,11 @@ final class Library {
         progress = s.progress
         episodesWatched = s.episodesWatched
         videos = s.videos ?? []
+        ratings = s.ratings ?? [:]
     }
 
     private func persist() {
-        let s = Snapshot(myList: myList, watched: watched, progress: progress, episodesWatched: episodesWatched, videos: videos)
+        let s = Snapshot(myList: myList, watched: watched, progress: progress, episodesWatched: episodesWatched, videos: videos, ratings: ratings)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: fileURL, options: .atomic) }
     }
 
@@ -183,6 +193,32 @@ final class Library {
         episodesWatched.contains("\(show):\(season):\(episode)")
     }
 
+    /// Marks one episode watched or not. Continue Watching follows: if the show's saved episode is this one, it becomes finished (so
+    /// Continue Watching offers the next episode) or, when unmarked, goes back to the start of the episode.
+    func setEpisodeWatched(show: Int, season: Int, episode: Int, _ on: Bool) {
+        let key = "\(show):\(season):\(episode)"
+        guard episodesWatched.contains(key) != on else { return }
+        let now = Date()
+        var out: [(String, String, JSONValue?, Bool)] = []
+        if on {
+            episodesWatched.insert(key)
+            out.append(("episode", "tv:" + key, .number(Self.ms(now)), false))
+        } else {
+            episodesWatched.remove(key)
+            out.append(("episode", "tv:" + key, nil, true))
+        }
+        let ref = MediaRef(type: .tv, id: show)
+        if var p = progress[ref.key], p.season == season, p.episode == episode, p.finished != on {
+            p.finished = on
+            p.position = on ? max(p.position, p.duration) : 0
+            p.updatedAt = now
+            progress[ref.key] = p
+            out.append(("progress", ref.key, Self.progressJSON(p), false))
+        }
+        persist()
+        out.forEach { emit($0.0, $0.1, $0.2, deleted: $0.3, at: now) }
+    }
+
     // MARK: Progress
 
     func progress(for ref: MediaRef) -> WatchProgress? { progress[ref.key] }
@@ -224,6 +260,54 @@ final class Library {
         out.forEach { emit($0.0, $0.1, $0.2, deleted: $0.3) }
     }
 
+    /// Takes an entry out of Continue Watching without marking it watched.
+    func removeProgress(_ ref: MediaRef) {
+        guard progress[ref.key] != nil else { return }
+        progress[ref.key] = nil
+        persist()
+        emit("progress", ref.key, nil, deleted: true)
+    }
+
+    /// Marks the title behind a Continue Watching entry as watched, which also removes the entry.
+    func markWatched(_ p: WatchProgress) {
+        setWatched(MediaItem(id: p.ref.id, type: p.ref.type, title: p.title, posterPath: p.posterPath, backdropPath: p.backdropPath), true)
+    }
+
+    // MARK: Ratings
+
+    /// 1 = thumbs up, -1 = thumbs down, 0 = not rated.
+    func rating(for ref: MediaRef) -> Int { ratings[ref.key]?.value ?? 0 }
+
+    /// Sets a thumb. Choosing the one already set clears it.
+    func setRating(_ item: MediaItem, _ value: Int) {
+        if rating(for: item.ref) == value {
+            ratings[item.ref.key] = nil
+            persist()
+            emit("rating", item.ref.key, nil, deleted: true)
+        } else {
+            let entry = RatedItem(item: item, value: value, date: Date())
+            ratings[item.ref.key] = entry
+            persist()
+            emit("rating", item.ref.key, Self.ratingJSON(entry), at: entry.date)
+        }
+    }
+
+    /// Titles to base "Because you watched" rows on: thumbs up (newest first), then watched titles, then finished episodes' shows.
+    func recommendationSeeds(limit: Int) -> [MediaItem] {
+        var seen = Set<MediaRef>()
+        var out: [MediaItem] = []
+        func add(_ item: MediaItem) {
+            guard out.count < limit, rating(for: item.ref) >= 0, seen.insert(item.ref).inserted else { return }
+            out.append(item)
+        }
+        ratings.values.filter { $0.value > 0 }.sorted { $0.date > $1.date }.forEach { add($0.item) }
+        watched.values.sorted { $0.date > $1.date }.forEach { add($0.item) }
+        progress.values.filter(\.finished).sorted { $0.updatedAt > $1.updatedAt }.forEach {
+            add(MediaItem(id: $0.ref.id, type: $0.ref.type, title: $0.title, posterPath: $0.posterPath, backdropPath: $0.backdropPath))
+        }
+        return out
+    }
+
     func clearHistory() {
         let keys = Array(progress.keys)
         let episodes = Array(episodesWatched)
@@ -238,7 +322,7 @@ final class Library {
 // MARK: - Sync format (the same shapes the TV app uses)
 
 extension Library {
-    private static func ms(_ d: Date) -> Double { (d.timeIntervalSince1970 * 1000).rounded() }
+    fileprivate static func ms(_ d: Date) -> Double { (d.timeIntervalSince1970 * 1000).rounded() }
     private static func date(_ ms: Double?) -> Date { Date(timeIntervalSince1970: (ms ?? Date().timeIntervalSince1970 * 1000) / 1000) }
 
     fileprivate static func itemJSON(_ i: MediaItem, extra: [(String, JSONValue?)]) -> JSONValue {
@@ -253,6 +337,15 @@ extension Library {
 
     fileprivate static func watchedJSON(_ s: SavedItem) -> JSONValue {
         itemJSON(s.item, extra: [("genre_ids", s.item.genreIDs.isEmpty ? nil : .array(s.item.genreIDs.map { .number(Double($0)) })), ("watchedAt", .number(ms(s.date)))])
+    }
+
+    fileprivate static func ratingJSON(_ r: RatedItem) -> JSONValue {
+        let i = r.item
+        return [String: JSONValue].compacting([
+            ("id", .number(Double(i.id))), ("media_type", .string(i.type.rawValue)), ("title", .string(i.title)),
+            ("poster_path", .text(i.posterPath)), ("backdrop_path", .text(i.backdropPath)),
+            ("genre_ids", .array(i.genreIDs.map { .number(Double($0)) })), ("rating", .number(Double(r.value))), ("ratedAt", .number(ms(r.date)))
+        ])
     }
 
     fileprivate static func progressJSON(_ p: WatchProgress) -> JSONValue {
@@ -317,6 +410,11 @@ extension Library {
         case "progress":
             if c.deleted { progress[c.key] = nil }
             else if let v = c.value, let p = Self.progress(from: v) { progress[c.key] = p }
+        case "rating":
+            if c.deleted { ratings[c.key] = nil }
+            else if let v = c.value, let item = Self.item(from: v), let r = v["rating"]?.int, r == 1 || r == -1 {
+                ratings[c.key] = RatedItem(item: item, value: r, date: Self.date(v["ratedAt"]?.double ?? c.updatedAt))
+            }
         case "episode":
             let key = c.key.hasPrefix("tv:") ? String(c.key.dropFirst(3)) : c.key
             if c.deleted { episodesWatched.remove(key) } else { episodesWatched.insert(key) }
@@ -332,6 +430,7 @@ extension Library {
         (s.videos ?? []).forEach { out.append(SyncChange(kind: "video", key: $0.id, value: videoJSON($0), updatedAt: ms($0.date))) }
         s.watched.forEach { out.append(SyncChange(kind: "watched", key: $0.key, value: watchedJSON($0.value), updatedAt: ms($0.value.date))) }
         s.progress.forEach { out.append(SyncChange(kind: "progress", key: $0.key, value: progressJSON($0.value), updatedAt: ms($0.value.updatedAt))) }
+        (s.ratings ?? [:]).forEach { out.append(SyncChange(kind: "rating", key: $0.key, value: ratingJSON($0.value), updatedAt: ms($0.value.date))) }
         let now = (Date().timeIntervalSince1970 * 1000).rounded()
         s.episodesWatched.forEach { out.append(SyncChange(kind: "episode", key: "tv:" + $0, value: .number(now), updatedAt: now)) }
         return out

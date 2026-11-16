@@ -7,7 +7,7 @@ final class SyncUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments += ["-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.resetLibrary", "YES"]
         app.launch()
     }
 
@@ -78,7 +78,7 @@ final class SyncUITests: XCTestCase {
 final class MyVideosUITests: XCTestCase {
     @MainActor func testAddAndPlayVideo() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-cf.resetLibrary", "YES"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.resetLibrary", "YES"]
         app.launch()
         app.tabBars.buttons["My Stuff"].tap()
         app.buttons["Videos"].firstMatch.tap()
@@ -124,7 +124,7 @@ final class MegaUITests: XCTestCase {
         let truth = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(string: "http://127.0.0.1:8130/truth.json")!)) as! [String: Any]
         let link = "https://mega.nz/folder/ROOT0001#" + (truth["folderKey"] as! String)
         let app = XCUIApplication()
-        app.launchArguments += ["-cf.resetLibrary", "YES", "-cf.megaApi", "http://127.0.0.1:8130/cs"]
+        app.launchArguments += ["-cf.noCast", "YES", "-cf.resetLibrary", "YES", "-cf.megaApi", "http://127.0.0.1:8130/cs"]
         app.launch()
         app.tabBars.buttons["My Stuff"].tap()
         app.buttons["Videos"].firstMatch.tap()

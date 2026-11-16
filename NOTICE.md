@@ -16,8 +16,9 @@ The wordmark image was rendered with a system font whose license does not allow 
 | Component | Where | License |
 |---|---|---|
 | [XcodeGen](https://github.com/yonaskolb/XcodeGen) | build tool only, not part of the app | MIT |
+| [Google Cast SDK for iOS](https://developers.google.com/cast/docs/ios_sender) | linked into the app for Chromecast; fetched by CocoaPods (`pod install`), not stored in this repository | Google Cast SDK terms |
 
-The app itself uses only Apple frameworks and has no third-party packages.
+Apart from the Google Cast SDK, the app uses only Apple frameworks.
 
 ## Services and content
 

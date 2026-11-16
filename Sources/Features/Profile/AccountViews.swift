@@ -5,7 +5,6 @@ import SwiftUI
 struct AccountCard: View {
     @Environment(SyncService.self) private var sync
     @State private var showSignIn = false
-    @State private var showPicker = false
     @State private var showConnect = false
     @State private var confirmSignOut = false
 
@@ -20,7 +19,6 @@ struct AccountCard: View {
         .padding(.horizontal, 16)
         .sheet(isPresented: $showSignIn) { SignInView() }
         .sheet(isPresented: $showConnect) { ConnectTVView() }
-        .fullScreenCover(isPresented: $showPicker) { ProfilePickerView() }
         .confirmationDialog("Sign out of \(sync.email ?? "this account")?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await sync.signOut() } }
         } message: {
@@ -33,16 +31,23 @@ struct AccountCard: View {
             AvatarView(id: p.avatar, name: p.name, colorHex: p.color, corner: 12)
                 .frame(width: 54, height: 54)
             VStack(alignment: .leading, spacing: 3) {
-                Text(p.name).font(.system(size: 18, weight: .bold))
+                HStack(spacing: 6) {
+                    Text(p.name).font(.system(size: 18, weight: .bold))
+                    if p.kids {
+                        Text("KIDS").font(.system(size: 10, weight: .heavy)).tracking(1)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.white, in: Capsule()).foregroundStyle(.black)
+                    }
+                }
                 Text(statusLine).font(.system(size: 13)).foregroundStyle(Theme.dim).lineLimit(1)
             }
             Spacer(minLength: 8)
             Menu {
-                Button { showPicker = true } label: { Label("Switch profile", systemImage: "person.2") }
+                Button { sync.guardLeaving("Enter the PIN to switch profile.") { sync.showPicker = true } } label: { Label("Switch profile", systemImage: "person.2") }
                 Button { Task { await sync.syncNow() } } label: { Label("Sync now", systemImage: "arrow.triangle.2.circlepath") }
-                Button { showConnect = true } label: { Label("Connect a TV", systemImage: "tv") }
+                Button { sync.guardLeaving("Enter the PIN to connect a TV.") { showConnect = true } } label: { Label("Connect a TV", systemImage: "tv") }
                 Divider()
-                Button(role: .destructive) { confirmSignOut = true } label: { Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right") }
+                Button(role: .destructive) { sync.guardLeaving("Enter the PIN to sign out.") { confirmSignOut = true } } label: { Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right") }
             } label: {
                 Image(systemName: "ellipsis.circle").font(.system(size: 24)).foregroundStyle(Theme.text2)
                     .frame(width: 44, height: 44)

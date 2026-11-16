@@ -21,7 +21,8 @@ install-iphone.sh        build and install on paired iPhones
 |---|---|
 | `Core/TMDB.swift` | Async TMDB client with caching and the `MediaRef` and `MediaItem` types |
 | `Core/MediaServer.swift` | Resolves stream URLs and the optional catalog from your server, bearer token handling |
-| `Core/Library.swift` | My List, watched state, progress and Continue Watching (stored on the device) |
+| `Core/Library.swift` | My List, watched state, ratings, progress and Continue Watching (stored on the device) |
+| `Core/KidsFilter.swift` | Kids profile rules: rating levels, discover limits and the one `isKidSafe` check used by every list, search and title page |
 | `Core/AppSettings.swift` | Settings with build-time defaults, and the server catalog state |
 | `Core/Subtitles.swift` | SubDL search and download, zip reader, subtitle parser and the subtitle clock |
 | `Features/Player/PlayerScreen.swift` | AVPlayer playback, the web-view player page mode, the clock injected into pages |

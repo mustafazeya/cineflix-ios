@@ -157,6 +157,7 @@ private struct RawDetails: Decodable {
     struct Creator: Decodable { let name: String }
 
     let id: Int
+    let adult: Bool?
     let title: String?
     let name: String?
     let overview: String?
@@ -217,12 +218,25 @@ actor ResponseCache {
     func clear() { store.removeAll() }
 }
 
+/// "Because you watched" lists, kept for the session so the Home screen does not ask again.
+final class RecommendationCache {
+    static let shared = RecommendationCache()
+    private var store: [String: [MediaItem]] = [:]
+    func get(_ key: String) -> [MediaItem]? { store[key] }
+    func set(_ key: String, _ items: [MediaItem]) { store[key] = items }
+}
+
 // MARK: - Client
 
 struct TMDB: Sendable {
     let token: String
     let language: String
     let region: String
+    /// Set while a kids profile is active. Everything this client returns is then limited by the policy.
+    var kids: KidsPolicy?
+
+    /// UI tests point this at a local stand-in with -cf.tmdbBase.
+    nonisolated(unsafe) static var endpoint = UserDefaults.standard.string(forKey: "cf.tmdbBase") ?? "https://api.themoviedb.org/3"
 
     static var today: String {
         let f = DateFormatter()
@@ -239,9 +253,11 @@ struct TMDB: Sendable {
     enum Failure: LocalizedError {
         case noToken
         case http(Int)
+        case blocked
 
         var errorDescription: String? {
             switch self {
+            case .blocked: "Not available on this profile"
             case .noToken: "Add your TMDB token in Settings."
             case .http(let code): "TMDB request failed (\(code))."
             }
@@ -255,7 +271,8 @@ struct TMDB: Sendable {
         var headers = ["Accept": "application/json"]
         if token.count > 40 { headers["Authorization"] = "Bearer \(token)" } else { q["api_key"] = token }
 
-        var comps = URLComponents(string: "https://api.themoviedb.org/3" + path)!
+        if kids != nil { q["include_adult"] = "false" }
+        var comps = URLComponents(string: Self.endpoint + path)!
         comps.queryItems = q.filter { !$0.value.isEmpty }.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         let url = comps.url!
 
@@ -280,29 +297,61 @@ struct TMDB: Sendable {
         raw.compactMap { $0.item(default: type) }.filter { $0.posterPath != nil || $0.backdropPath != nil }
     }
 
+    /// For a kids profile, drops everything that is not kid-safe. Other profiles get the list unchanged.
+    private func limited(_ items: [MediaItem]) async -> [MediaItem] {
+        guard let kids else { return items }
+        return await KidsFilter.shared.filter(items, policy: kids, tmdb: self)
+    }
+
+    // MARK: Ratings
+
+    /// A title's US maturity rating: movies from /movie/ID/release_dates, series from /tv/ID/content_ratings.
+    func usRating(_ ref: MediaRef) async -> RatingLookup {
+        do {
+            if ref.type == .movie {
+                let r: RawDetails.ReleaseDates = try await fetch("/movie/\(ref.id)/release_dates", ttl: 86400)
+                return .found(Self.movieRating(r))
+            }
+            let r: RawDetails.ContentRatings = try await fetch("/tv/\(ref.id)/content_ratings", ttl: 86400)
+            return .found(Self.tvRating(r))
+        } catch {
+            return .failed
+        }
+    }
+
+    fileprivate static func movieRating(_ r: RawDetails.ReleaseDates?) -> MaturityRating? {
+        let us = (r?.results ?? []).filter { $0.iso31661 == "US" }.flatMap(\.releaseDates)
+        return MaturityRating.strictest(us.map { MaturityRating(movieCertification: $0.certification) })
+    }
+
+    fileprivate static func tvRating(_ r: RawDetails.ContentRatings?) -> MaturityRating? {
+        MaturityRating.strictest((r?.results ?? []).filter { $0.iso31661 == "US" }.map { MaturityRating(tvRating: $0.rating) })
+    }
+
     // MARK: Lists
 
     func trending(_ type: MediaType?, week: Bool = false) async throws -> [MediaItem] {
         let p: RawPage = try await fetch("/trending/\(type?.rawValue ?? "all")/\(week ? "week" : "day")")
-        return playable(p.results, type)
+        return await limited(playable(p.results, type))
     }
 
     /// kind: popular, top_rated, now_playing, upcoming, on_the_air, airing_today
     func list(_ type: MediaType, _ kind: String, page: Int = 1) async throws -> ItemPage {
         let p: RawPage = try await fetch("/\(type.rawValue)/\(kind)", ["page": String(page), "region": region])
-        return ItemPage(items: playable(p.results, type), totalPages: p.totalPages ?? 1)
+        return ItemPage(items: await limited(playable(p.results, type)), totalPages: p.totalPages ?? 1)
     }
 
     func discover(_ type: MediaType, _ params: [String: String]) async throws -> ItemPage {
         var q = ["sort_by": "popularity.desc", "vote_count.gte": "50"]
         params.forEach { q[$0.key] = $0.value }
+        if let kids { q = kids.discover(type, q) }
         let p: RawPage = try await fetch("/discover/\(type.rawValue)", q)
-        return ItemPage(items: playable(p.results, type), totalPages: p.totalPages ?? 1)
+        return ItemPage(items: await limited(playable(p.results, type)), totalPages: p.totalPages ?? 1)
     }
 
     func search(_ query: String) async throws -> [MediaItem] {
         let p: RawPage = try await fetch("/search/multi", ["query": query, "include_adult": "false"], ttl: 300)
-        return playable(p.results, nil)
+        return await limited(playable(p.results, nil))
     }
 
     func genres(_ type: MediaType) async throws -> [Genre] {
@@ -331,7 +380,7 @@ struct TMDB: Sendable {
 
     func personCredits(_ id: Int, _ type: MediaType) async throws -> [MediaItem] {
         let r: RawCredits = try await fetch("/person/\(id)/\(type == .tv ? "tv_credits" : "movie_credits")")
-        return playable(r.cast, type)
+        return await limited(playable(r.cast, type))
     }
 
     // MARK: Titles
@@ -363,6 +412,11 @@ struct TMDB: Sendable {
             : "credits,videos,recommendations,content_ratings,images"
         let d: RawDetails = try await fetch("/\(ref.type.rawValue)/\(ref.id)",
                                             ["append_to_response": extra, "include_image_language": "\(lang),en,null"])
+        if let kids {
+            let rating = ref.type == .movie ? Self.movieRating(d.releaseDates) : Self.tvRating(d.contentRatings)
+            KidsFilter.shared.record(ref, rating: rating)
+            guard d.adult != true, kids.genresAllowed((d.genres ?? []).map(\.id)), kids.allows(rating) else { throw Failure.blocked }
+        }
         let date = (d.releaseDate?.isEmpty == false) ? d.releaseDate : d.firstAirDate
         let item = MediaItem(id: d.id, type: ref.type, title: d.title ?? d.name ?? "", overview: d.overview ?? "",
                              posterPath: d.posterPath, backdropPath: d.backdropPath,
@@ -402,10 +456,24 @@ struct TMDB: Sendable {
             cast: Array((d.credits?.cast ?? []).prefix(20)),
             credit: credit,
             trailerKey: trailer?.key,
-            recommendations: playable(d.recommendations?.results ?? [], ref.type).filter { $0.posterPath != nil },
+            recommendations: await limited(playable(d.recommendations?.results ?? [], ref.type).filter { $0.posterPath != nil }),
             certification: (cert?.isEmpty == false) ? cert : nil,
             logoPath: Self.bestLogo(d.images?.logos ?? [], lang: lang)
         )
+    }
+
+    /// Titles like this one: TMDB's recommendations, or its similar titles when there are none.
+    func recommendations(_ ref: MediaRef) async -> [MediaItem] {
+        let key = "\(ref.key)|\(kids?.maxRating.code ?? "-")"
+        if let cached = RecommendationCache.shared.get(key) { return cached }
+        var items: [MediaItem] = []
+        for kind in ["recommendations", "similar"] {
+            guard let p: RawPage = try? await fetch("/\(ref.type.rawValue)/\(ref.id)/\(kind)") else { continue }
+            items = await limited(playable(p.results, ref.type).filter { $0.posterPath != nil })
+            if !items.isEmpty { break }
+        }
+        if !Task.isCancelled { RecommendationCache.shared.set(key, items) }     // a row scrolled away mid-load must not cache an empty list
+        return items
     }
 
     /// The episode after (season, episode), crossing into the next season. Only aired episodes.
