@@ -1,0 +1,2 @@
+#include "App.xcconfig"
+#include? "../Pods/Target Support Files/Pods-CineFlix/Pods-CineFlix.debug.xcconfig"

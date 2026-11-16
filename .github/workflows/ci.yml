@@ -17,7 +17,7 @@ jobs:
       - name: Toolchain
         run: |
           xcodebuild -version
-          brew install xcodegen
+          brew install xcodegen cocoapods
 
       - name: Repository has no private files
         run: |
@@ -34,8 +34,9 @@ jobs:
         run: |
           cp Config/Secrets.example.xcconfig Config/Secrets.xcconfig
           xcodegen generate
+          pod install
 
       - name: Build for the simulator
         run: |
-          xcodebuild build -project CineFlix.xcodeproj -scheme CineFlix \
+          xcodebuild build -workspace CineFlix.xcworkspace -scheme CineFlix \
             -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO -quiet

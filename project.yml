@@ -19,8 +19,8 @@ targets:
       - Sources
       - Resources
     configFiles:
-      Debug: Config/App.xcconfig
-      Release: Config/App.xcconfig
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(CF_BUNDLE_ID)
@@ -45,7 +45,10 @@ targets:
           - audio
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-        NSLocalNetworkUsageDescription: CineFlix connects to your own media server on the local network.
+        NSLocalNetworkUsageDescription: CineFlix connects to your own media server and finds Chromecast devices on your Wi-Fi.
+        NSBonjourServices:
+          - _googlecast._tcp
+          - _CC1AD845._googlecast._tcp
         ITSAppUsesNonExemptEncryption: false
         TMDBToken: $(TMDB_TOKEN)
         SubDLKey: $(SUBDL_KEY)

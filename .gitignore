@@ -1,6 +1,8 @@
 Config/Secrets.xcconfig
 Config/Signing.xcconfig
 *.xcodeproj/
+*.xcworkspace/
+Pods/
 build/
 DerivedData/
 logs/

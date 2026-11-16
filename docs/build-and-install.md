@@ -4,10 +4,11 @@
 
 - macOS with **Xcode 27** (the project targets the iOS 27 SDK and runs on iOS 26 or later)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
+- [CocoaPods](https://cocoapods.org) for the Google Cast SDK (Chromecast): `brew install cocoapods`
 - An iPhone on iOS 26 or later, connected by cable or on the same Wi-Fi as the Mac
 - An Apple ID signed in to Xcode (**Xcode > Settings > Accounts**). A free personal team works
 
-The Xcode project is generated from `project.yml` and is not committed. `install-iphone.sh` runs `xcodegen generate` for you.
+The Xcode project is generated from `project.yml` and is not committed. `install-iphone.sh` runs `xcodegen generate` and `pod install` for you.
 
 ## 1. Secrets
 
@@ -67,11 +68,12 @@ A paid Apple Developer Program account removes the 7-day limit and allows TestFl
 ```bash
 cp Config/Secrets.example.xcconfig Config/Secrets.xcconfig
 xcodegen generate
-xcodebuild build -project CineFlix.xcodeproj -scheme CineFlix \
+pod install    # Google Cast SDK for Chromecast (CocoaPods)
+xcodebuild build -workspace CineFlix.xcworkspace -scheme CineFlix \
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
 ```
 
-Or open `CineFlix.xcodeproj` in Xcode and run it on a simulator.
+Or open `CineFlix.xcworkspace` in Xcode and run it on a simulator.
 
 ## Adding another iPhone
 

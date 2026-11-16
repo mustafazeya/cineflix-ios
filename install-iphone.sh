@@ -11,6 +11,8 @@ if [ "${1:-}" = "--no-launch" ]; then shift; fi
 
 [ -f Config/Secrets.xcconfig ] || echo "Note: Config/Secrets.xcconfig missing; the app will ask for a TMDB token."
 xcodegen generate >/dev/null
+export LANG="${LANG:-en_US.UTF-8}"   # CocoaPods needs a UTF-8 locale, which launchd jobs do not set
+if ! pod install --no-repo-update >/dev/null 2>&1 && ! pod install >/dev/null 2>&1; then echo "pod install failed (install CocoaPods: brew install cocoapods)"; exit 1; fi
 bundle_id=$(awk -F= '/^[[:space:]]*CF_BUNDLE_ID[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); v=$2} END {print v}' Config/App.xcconfig Config/Signing.xcconfig 2>/dev/null)
 
 if [ "$#" -gt 0 ]; then
@@ -33,7 +35,7 @@ for device in "${devices[@]}"; do
   # Xcode sometimes lists a reachable phone late ("Unable to find a destination"), so wait and retry a few times.
   built=0
   for attempt in 1 2 3 4; do
-    out=$(xcodebuild -project CineFlix.xcodeproj -scheme CineFlix -configuration Release \
+    out=$(xcodebuild -workspace CineFlix.xcworkspace -scheme CineFlix -configuration Release \
         -destination "id=$device" -derivedDataPath "build/device-$device" -allowProvisioningUpdates -quiet build 2>&1) && { built=1; break; }
     if grep -Eq "Unable to find a (destination|device)" <<<"$out" && [ "$attempt" -lt 4 ]; then
       echo "Xcode does not list $device yet; retrying in 20 s ($attempt/4)"; sleep 20
