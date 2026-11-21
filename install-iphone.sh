@@ -29,6 +29,11 @@ if [ "${#devices[@]}" -eq 0 ]; then
 fi
 
 failed=0
+# Ask Apple for a new 7-day signature while the old one still has days left (see scripts/renew-profile.sh).
+if [ "$(scripts/renew-profile.sh "$bundle_id" 4)" = "renewed" ]; then
+  echo "Signing profile was close to expiring; requesting a new one"
+  rm -rf build/device-*/Build/Products/Release-iphoneos/*.app
+fi
 for device in "${devices[@]}"; do
   echo "== $device"
   # Each device gets its own build so the signing profile includes it.
