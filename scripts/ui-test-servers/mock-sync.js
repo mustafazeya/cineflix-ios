@@ -69,7 +69,7 @@ function owned(acc, id) {
 function session(acc) { const t = crypto.randomBytes(24).toString('hex'); sessions.set(t, acc.email); return t; }
 
 function applyChange(p, c, now) {
-  const kinds = ['list', 'progress', 'watched', 'episode', 'prefs', 'video', 'rating'];
+  const kinds = ['list', 'progress', 'watched', 'episode', 'prefs', 'video', 'rating', 'resume'];
   if (!kinds.includes(c.kind)) throw new Fail(400, 'invalid_kind', 'kind must be one of ' + kinds.join(', '));
   if (typeof c.key !== 'string' || !/^[A-Za-z0-9:._-]{1,64}$/.test(c.key)) throw new Fail(400, 'invalid_key', 'bad key');
   const deleted = !!c.deleted;

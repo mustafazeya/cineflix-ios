@@ -13,7 +13,7 @@ final class SyncService {
         var profileID: String?
         var rev: [String: Int] = [:]
         var profiles: [SyncProfile] = []
-        /// 2 = knows My Videos. Older versions skipped those items but still moved past them.
+        /// 2 = knows My Videos. 3 = knows resume points of saved links and MEGA files. Older versions skipped those items but still moved past them.
         var schema: Int?
     }
 
@@ -65,7 +65,7 @@ final class SyncService {
         email = stored.email
         profiles = stored.profiles
         activeProfileID = stored.profileID
-        if token != nil, (stored.schema ?? 1) < 2 { stored.rev = [:]; stored.schema = 2; saveStored() }   // one full re-download
+        if token != nil, (stored.schema ?? 1) < 3 { stored.rev = [:]; stored.schema = 3; saveStored() }   // one full re-download
         library.onChange = { [weak self] change in self?.note(change) }
         if isSignedIn, let id = activeProfileID, activeProfile != nil {
             library.useNamespace(id)

@@ -29,6 +29,53 @@ struct RatedItem: Codable, Hashable, Sendable {
     var date: Date
 }
 
+/// Where a saved link or a MEGA file was left off. Keyed by `ResumeKey`; synced as kind "resume" with the same shape the TV app uses.
+struct ResumePoint: Codable, Hashable, Sendable {
+    var key: String
+    var position: Double
+    var duration: Double
+    var title: String
+    var updatedAt: Date
+
+    var fraction: Double { duration > 0 ? min(1, position / duration) : 0 }
+
+    /// Offered as the start position: past the first 10 seconds and not within the last 15.
+    var isResumable: Bool { position > 10 && (duration <= 0 || position < duration - 15) }
+
+    var label: String { "Resume " + Self.clock(position) }
+
+    static func clock(_ seconds: Double) -> String {
+        let s = Int(max(0, seconds))
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+/// Sync keys for resume points: "v:<videoId>" for a saved link, "m:<videoId>:<nodeId>" for a file inside a saved MEGA link.
+/// The server only accepts ^[A-Za-z0-9:._-]{1,64}$, so a part that is too long or has other characters becomes a short stable hash
+/// (FNV-1a, 32 bit, lower case hex).
+nonisolated enum ResumeKey {
+    static func video(_ id: String) -> String { "v:" + part(id, room: 62) }
+
+    static func megaPrefix(videoID: String) -> String { "m:" + part(videoID, room: 24) + ":" }
+
+    static func mega(videoID: String, node: String) -> String {
+        let prefix = megaPrefix(videoID: videoID)
+        return prefix + part(node, room: 64 - prefix.count)
+    }
+
+    static func isValid(_ key: String) -> Bool {
+        (1...64).contains(key.utf8.count) && key.utf8.allSatisfy { ($0 >= 48 && $0 <= 58) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 46 || $0 == 95 || $0 == 45 }
+    }
+
+    private static func part(_ s: String, room: Int) -> String { !s.isEmpty && s.count <= room && isValid(s) ? s : hash(s) }
+
+    static func hash(_ s: String) -> String {
+        var h: UInt32 = 2_166_136_261
+        for b in s.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
+        return String(h, radix: 16)
+    }
+}
+
 struct WatchProgress: Codable, Hashable, Sendable {
     var ref: MediaRef
     var season: Int?
@@ -56,6 +103,8 @@ final class Library {
     private(set) var episodesWatched: Set<String> = []
     private(set) var videos: [SavedVideo] = []
     private(set) var ratings: [String: RatedItem] = [:]
+    /// Resume points of saved links and MEGA files, by `ResumeKey`.
+    private(set) var resumes: [String: ResumePoint] = [:]
 
     /// nil = guest data, otherwise the signed-in profile whose file is loaded.
     private(set) var namespace: String?
@@ -70,6 +119,7 @@ final class Library {
         var episodesWatched: Set<String>
         var videos: [SavedVideo]?
         var ratings: [String: RatedItem]?
+        var resumes: [String: ResumePoint]?
     }
 
     private static let directory: URL = {
@@ -94,7 +144,7 @@ final class Library {
     }
 
     private func load() {
-        myList = []; watched = [:]; progress = [:]; episodesWatched = []; videos = []; ratings = [:]
+        myList = []; watched = [:]; progress = [:]; episodesWatched = []; videos = []; ratings = [:]; resumes = [:]
         guard let data = try? Data(contentsOf: fileURL),
               let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         myList = s.myList
@@ -103,10 +153,11 @@ final class Library {
         episodesWatched = s.episodesWatched
         videos = s.videos ?? []
         ratings = s.ratings ?? [:]
+        resumes = s.resumes ?? [:]
     }
 
     private func persist() {
-        let s = Snapshot(myList: myList, watched: watched, progress: progress, episodesWatched: episodesWatched, videos: videos, ratings: ratings)
+        let s = Snapshot(myList: myList, watched: watched, progress: progress, episodesWatched: episodesWatched, videos: videos, ratings: ratings, resumes: resumes)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: fileURL, options: .atomic) }
     }
 
@@ -159,8 +210,40 @@ final class Library {
 
     func removeVideo(_ id: String) {
         videos.removeAll { $0.id == id }
+        let stale = resumes.keys.filter { $0 == ResumeKey.video(id) || $0.hasPrefix(ResumeKey.megaPrefix(videoID: id)) }
+        stale.forEach { resumes[$0] = nil }
         persist()
         emit("video", id, nil, deleted: true)
+        stale.forEach { emit("resume", $0, nil, deleted: true) }
+    }
+
+    // MARK: Resume points (saved links and MEGA files)
+
+    func resumePoint(_ key: String) -> ResumePoint? { resumes[key] }
+
+    /// The position to start at for this key, or 0.
+    func resumePosition(_ key: String?) -> Double {
+        guard let key, let p = resumes[key], p.isResumable else { return 0 }
+        return p.position
+    }
+
+    /// Remembers where a link or MEGA file is. Under 10 seconds nothing is saved; past 95% the entry is deleted so the next play starts over.
+    func recordResume(key: String, position: Double, duration: Double, title: String) {
+        guard ResumeKey.isValid(key), position.isFinite, duration.isFinite else { return }
+        if duration > 0, position / duration > 0.95 { clearResume(key); return }
+        guard position >= 10 else { return }
+        let point = ResumePoint(key: key, position: position.rounded(), duration: duration.rounded(), title: String(title.prefix(100)), updatedAt: Date())
+        resumes[key] = point
+        persist()
+        emit("resume", key, Self.resumeJSON(point), at: point.updatedAt)
+    }
+
+    /// Forgets the position ("Start over", or the video was finished).
+    func clearResume(_ key: String) {
+        guard resumes[key] != nil else { return }
+        resumes[key] = nil
+        persist()
+        emit("resume", key, nil, deleted: true)
     }
 
     private static func newVideoID() -> String {
@@ -311,10 +394,13 @@ final class Library {
     func clearHistory() {
         let keys = Array(progress.keys)
         let episodes = Array(episodesWatched)
+        let points = Array(resumes.keys)
         progress.removeAll()
         episodesWatched.removeAll()
+        resumes.removeAll()
         persist()
         keys.forEach { emit("progress", $0, nil, deleted: true) }
+        points.forEach { emit("resume", $0, nil, deleted: true) }
         episodes.forEach { emit("episode", "tv:" + $0, nil, deleted: true) }
     }
 }
@@ -361,6 +447,15 @@ extension Library {
         var o: [String: JSONValue] = ["id": .string(v.id), "name": .string(v.name), "url": .string(v.url), "addedAt": .number(ms(v.date))]
         if v.type == "mega" { o["type"] = .string("mega") }
         return .object(o)
+    }
+
+    fileprivate static func resumeJSON(_ r: ResumePoint) -> JSONValue {
+        .object(["key": .string(r.key), "position": .number(r.position), "duration": .number(r.duration), "title": .string(r.title), "updatedAt": .number(ms(r.updatedAt))])
+    }
+
+    private static func resume(from j: JSONValue, fallback: Double) -> ResumePoint? {
+        guard let key = j["key"]?.string, ResumeKey.isValid(key), let position = j["position"]?.double else { return nil }
+        return ResumePoint(key: key, position: position, duration: j["duration"]?.double ?? 0, title: j["title"]?.string ?? "", updatedAt: date(j["updatedAt"]?.double ?? fallback))
     }
 
     private static func video(from j: JSONValue, fallback: Double) -> SavedVideo? {
@@ -415,6 +510,12 @@ extension Library {
             else if let v = c.value, let item = Self.item(from: v), let r = v["rating"]?.int, r == 1 || r == -1 {
                 ratings[c.key] = RatedItem(item: item, value: r, date: Self.date(v["ratedAt"]?.double ?? c.updatedAt))
             }
+        case "resume":
+            let at = Self.date(c.updatedAt)
+            // The newest edit wins, also against what is already stored here.
+            if let have = resumes[c.key], have.updatedAt > at { break }
+            if c.deleted { resumes[c.key] = nil }
+            else if let v = c.value, var r = Self.resume(from: v, fallback: c.updatedAt) { r.key = c.key; resumes[c.key] = r }
         case "episode":
             let key = c.key.hasPrefix("tv:") ? String(c.key.dropFirst(3)) : c.key
             if c.deleted { episodesWatched.remove(key) } else { episodesWatched.insert(key) }
@@ -431,6 +532,7 @@ extension Library {
         s.watched.forEach { out.append(SyncChange(kind: "watched", key: $0.key, value: watchedJSON($0.value), updatedAt: ms($0.value.date))) }
         s.progress.forEach { out.append(SyncChange(kind: "progress", key: $0.key, value: progressJSON($0.value), updatedAt: ms($0.value.updatedAt))) }
         (s.ratings ?? [:]).forEach { out.append(SyncChange(kind: "rating", key: $0.key, value: ratingJSON($0.value), updatedAt: ms($0.value.date))) }
+        (s.resumes ?? [:]).forEach { out.append(SyncChange(kind: "resume", key: $0.key, value: resumeJSON($0.value), updatedAt: ms($0.value.updatedAt))) }
         let now = (Date().timeIntervalSince1970 * 1000).rounded()
         s.episodesWatched.forEach { out.append(SyncChange(kind: "episode", key: "tv:" + $0, value: .number(now), updatedAt: now)) }
         return out

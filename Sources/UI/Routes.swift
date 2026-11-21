@@ -38,6 +38,8 @@ struct PlaybackRequest: Identifiable, Hashable {
     var link: URL?
     /// Set for a file inside a MEGA link.
     var mega: MegaPlay?
+    /// Where this link or MEGA file keeps its position (see `ResumeKey`). nil for titles from the media server, which use `ref`.
+    var resumeKey: String?
 
     var isCustom: Bool { link != nil || mega != nil }
 }
@@ -45,6 +47,8 @@ struct PlaybackRequest: Identifiable, Hashable {
 nonisolated struct MegaPlay: Hashable, Sendable {
     var linkText: String
     var node: String
+    /// The saved My Videos entry the file belongs to; part of its resume key.
+    var videoID: String?
 }
 
 /// Opens the player from anywhere (hero, details, Continue Watching).
@@ -63,14 +67,16 @@ final class PlayerPresenter {
     /// Plays a saved link. It does not need the media server to be set up.
     func playLink(_ video: SavedVideo) {
         guard let url = URL(string: video.url) else { return }
-        current = PlaybackRequest(ref: MediaRef(type: .movie, id: 0), title: video.name, subtitle: video.host, link: url)
+        current = PlaybackRequest(ref: MediaRef(type: .movie, id: 0), title: video.name, subtitle: video.host, link: url,
+                                  resumeKey: ResumeKey.video(video.id))
     }
 
     func playMega(_ video: SavedVideo, node: MegaNode, folder: MegaFolder) {
         let parent = node.parent.isEmpty ? [] : folder.path(to: node.parent)
         let subtitle = ([video.name] + parent).joined(separator: " \u{00B7} ")
         current = PlaybackRequest(ref: MediaRef(type: .movie, id: 0), title: (node.name as NSString).deletingPathExtension,
-                                  subtitle: subtitle, mega: MegaPlay(linkText: video.url, node: node.id))
+                                  subtitle: subtitle, mega: MegaPlay(linkText: video.url, node: node.id, videoID: video.id),
+                                  resumeKey: ResumeKey.mega(videoID: video.id, node: node.id))
     }
 
     func playTrailer(_ key: String) { trailerKey = TrailerKey(id: key) }

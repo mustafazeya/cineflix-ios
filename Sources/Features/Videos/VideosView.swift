@@ -1,5 +1,25 @@
 import SwiftUI
 
+/// "Resume 12:34" and a thin bar for a video that was left part way.
+struct ResumeLine: View {
+    let point: ResumePoint
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(point.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text2)
+            if point.fraction > 0 {
+                Capsule().fill(.white.opacity(0.16)).frame(height: 3)
+                    .overlay(alignment: .leading) {
+                        GeometryReader { g in Capsule().fill(Theme.accent).frame(width: g.size.width * point.fraction) }
+                    }
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("resume-line")
+    }
+}
+
 /// My Videos: links saved by hand. They sync with the profile and play in the normal player.
 struct VideosSection: View {
     @Environment(Library.self) private var library
@@ -11,6 +31,17 @@ struct VideosSection: View {
 
     struct EditTarget: Identifiable { let id = UUID(); let video: SavedVideo? }
 
+
+    /// The key a saved link keeps its position under: the link itself, or the one file of a single-file MEGA link.
+    private func resumeKey(_ v: SavedVideo) -> String? {
+        guard v.isMega else { return ResumeKey.video(v.id) }
+        guard let link = MegaLink.parse(v.url), link.isSingleFile, let node = link.kind == .file ? link.id : link.sub else { return nil }
+        return ResumeKey.mega(videoID: v.id, node: node)
+    }
+
+    private func resumePoint(_ v: SavedVideo) -> ResumePoint? {
+        resumeKey(v).flatMap { library.resumePoint($0) }.flatMap { $0.isResumable ? $0 : nil }
+    }
 
     @ViewBuilder private func rowButton(_ v: SavedVideo) -> some View {
         if v.isMega, let link = MegaLink.parse(v.url), !link.isSingleFile {
@@ -33,6 +64,7 @@ struct VideosSection: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(v.name).font(.system(size: 17, weight: .semibold)).lineLimit(1)
                 Text(v.isMega ? megaLabel(v) : v.host).font(.system(size: 13)).foregroundStyle(Theme.dim).lineLimit(1)
+                if let point = resumePoint(v) { ResumeLine(point: point).padding(.top, 2) }
             }
             Spacer(minLength: 8)
             if opening == v.id { ProgressView() }
@@ -83,6 +115,9 @@ struct VideosSection: View {
                         rowButton(v)
 
                         Menu {
+                            if let key = resumeKey(v), resumePoint(v) != nil {
+                                Button { library.clearResume(key) } label: { Label("Start over", systemImage: "arrow.counterclockwise") }
+                            }
                             Button { editing = EditTarget(video: v) } label: { Label("Edit", systemImage: "pencil") }
                             Button(role: .destructive) { deleting = v } label: { Label("Delete", systemImage: "trash") }
                         } label: {
@@ -96,6 +131,11 @@ struct VideosSection: View {
                     .padding(.leading, 14)
                     .padding(.vertical, 6)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contextMenu {
+                        if let key = resumeKey(v), resumePoint(v) != nil {
+                            Button { library.clearResume(key) } label: { Label("Start over", systemImage: "arrow.counterclockwise") }
+                        }
+                    }
                 }
             }
         }
@@ -315,8 +355,19 @@ struct MegaFolderView: View {
             } else {
                 Button { play(n, f) } label: { row(n, f) }.buttonStyle(.plain)
                     .accessibilityIdentifier("mega-\(n.name)")
+                    .contextMenu {
+                        if let key = resumeKey(n), resumePoint(n) != nil {
+                            Button { library.clearResume(key) } label: { Label("Start over", systemImage: "arrow.counterclockwise") }
+                        }
+                    }
             }
         }
+    }
+
+    private func resumeKey(_ n: MegaNode) -> String? { video.map { ResumeKey.mega(videoID: $0.id, node: n.id) } }
+
+    private func resumePoint(_ n: MegaNode) -> ResumePoint? {
+        resumeKey(n).flatMap { library.resumePoint($0) }.flatMap { $0.isResumable ? $0 : nil }
     }
 
     private func row(_ n: MegaNode, _ f: MegaFolder) -> some View {
@@ -331,6 +382,7 @@ struct MegaFolderView: View {
                 if !n.isDir {
                     let where_ = f.path(to: n.parent).joined(separator: " / ")
                     Text(where_.isEmpty ? Self.size(n.size) : where_ + " \u{00B7} " + Self.size(n.size)).font(.system(size: 13)).foregroundStyle(Theme.dim).lineLimit(1)
+                    if let point = resumePoint(n) { ResumeLine(point: point).padding(.top, 2) }
                 }
             }
             Spacer(minLength: 8)
