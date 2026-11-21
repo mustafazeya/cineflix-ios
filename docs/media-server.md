@@ -29,6 +29,18 @@ The optional [page bridge](https://github.com/mustafazeya/cineflix-webos/blob/ma
 (`tools/makeflix-page-bridge.js` in the TV repository) works on iPhone too: it reports progress and the end of playback with the same messages
 (`source: 'makeflix-page'`).
 
+## AirPlay and pages that play through MediaSource
+
+Many player pages feed hls.js or MediaSource into a `blob:` address. The iPhone can send the sound of such a page to AirPlay but not the
+picture. While a page is showing, the app watches which stream address it loads (an HLS master playlist, an `.m3u8`, or a `.mp4`, `.webm`
+or `.mov` file), and a **Play natively** button appears in the player's top bar. It opens that address in the native player at the page
+video's position, with the page's Referer, User-Agent and cookies, and AirPlay and Chromecast then show the picture. The page remains
+the default and **Back to page** returns to it. If the stream does not play outside the page, the player says so and offers the page.
+
+This works for streams a plain player can fetch. A stream that needs a token the page builds in JavaScript on every request, is protected
+(DRM) or is only reachable through the page's own scripts will not play natively. AirPlay hands the address to the Apple TV, which fetches
+it by itself, so a server that insists on the page's Referer or cookie may not play on the receiver even when it plays on the phone.
+
 ## Codecs
 
 H.264 or HEVC video with AAC audio in MP4 or HLS plays natively through AVPlayer, with Picture in Picture and AirPlay.

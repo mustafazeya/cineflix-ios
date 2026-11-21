@@ -21,11 +21,12 @@ install-iphone.sh        build and install on paired iPhones
 |---|---|
 | `Core/TMDB.swift` | Async TMDB client with caching and the `MediaRef` and `MediaItem` types |
 | `Core/MediaServer.swift` | Resolves stream URLs and the optional catalog from your server, bearer token handling |
-| `Core/Library.swift` | My List, watched state, ratings, progress and Continue Watching (stored on the device) |
+| `Core/Library.swift` | My List, watched state, ratings, progress, Continue Watching and the resume points of saved links and MEGA files (stored on the device, synced per profile) |
 | `Core/KidsFilter.swift` | Kids profile rules: rating levels, discover limits and the one `isKidSafe` check used by every list, search and title page |
 | `Core/AppSettings.swift` | Settings with build-time defaults, and the server catalog state |
 | `Core/Subtitles.swift` | SubDL search and download, zip reader, subtitle parser and the subtitle clock |
 | `Features/Player/PlayerScreen.swift` | AVPlayer playback, the web-view player page mode, the clock injected into pages |
+| `Features/Player/StreamDetection.swift` | The script that finds the stream behind a web player page, the choice between candidates, and the headers the native player sends |
 | `Features/Player/SubtitleSheet.swift` | Subtitle search and selection UI |
 | `UI/Theme.swift` | Palette and typography |
 
@@ -40,5 +41,13 @@ install-iphone.sh        build and install on paired iPhones
 - Subtitles use a *real clock only*. The player reports its position and whether it is moving, and the subtitle controller lets a report
   coast for at most one second. Nothing runs on its own, so paused, stalled and ended video can never show moving text.
 - For web player pages a small script is injected into every frame. It picks the largest, or playing, `<video>` and reports position and pause state to the app.
+- Resume points use sync kind `resume`, key `v:<videoId>` (saved link) or `m:<videoId>:<nodeId>` (file in a saved MEGA link), value
+  `{key, position, duration, title, updatedAt}`; the TV app uses the same format. Keys must match `^[A-Za-z0-9:._-]{1,64}$`, so a part that is
+  too long or has other characters becomes an FNV-1a (32 bit, hex) hash. Past 95% the entry is deleted, so the next play starts at 0.
+  A sync cursor reset (`schema` in `SyncService`) makes existing accounts download the new kind once.
+- A page that plays through MediaSource or `blob:` cannot send its picture to AirPlay. The injected stream script reports the real stream
+  address (the master playlist is preferred over its quality playlists) and "Play natively" opens it in AVPlayer with the page's Referer,
+  User-Agent and cookies. The Chromecast proxy sends the same headers when it fetches that stream for the TV. Only what the page does through
+  XMLHttpRequest, fetch, `src` and hls.js is seen; AirPlay itself fetches the address from the Apple TV without those headers.
 - The Search tab's search field uses `.searchable` with `.navigationBarDrawer(displayMode: .always)` inside a `NavigationStack`; without that it does not show.
 - Deployment target is iOS 26 even though the SDK is iOS 27, so current iPhones on iOS 26 can run it.

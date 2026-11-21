@@ -20,6 +20,9 @@ The LG TV version lives in [cineflix-webos](https://github.com/mustafazeya/cinef
 - **My Stuff**: Continue Watching (long-press to mark watched or remove), My List, Already Watched, Settings
 - **Profiles**: kids profiles with a maximum rating and a PIN, thumbs up or down on titles, and "Because you watched" rows on Home
 - **Player**: native AVPlayer for MP4 and HLS with resume, Picture in Picture, AirPlay and auto next episode, or an in-app web view for servers that return their own player page
+- **Resume everywhere**: saved links and MEGA files remember their position, synced per profile, with a progress bar and "Start over" in My Videos
+- **Play natively**: for a server page that plays through a blob: address (AirPlay would carry sound only), a button switches to the native player on the stream the page loads
+- **Next episode**: a countdown card near the end of an episode (Play now, or keep watching the credits), a Next episode button in the player, and an autoplay switch in Settings
 - **Casting**: Chromecast from the Home screen or the player (the phone is the remote, MEGA files included) and AirPlay for normal video links
 - **Subtitle search** from SubDL for the exact movie or episode, kept in step with the real video clock ([details](docs/subtitles.md))
 - Everything personal (list, progress, settings) is stored on the device only

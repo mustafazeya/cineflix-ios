@@ -6,6 +6,7 @@ import XCTest
 enum Mock {
     static let sync = "http://127.0.0.1:8150"
     static let tmdb = "http://127.0.0.1:8151"
+    static let page = "http://127.0.0.1:8161"
 
     private final class Box: @unchecked Sendable { var value: Any? }
 
@@ -59,6 +60,20 @@ enum Mock {
         return (p?["items"] as? [[String: Any]])?.first { $0["kind"] as? String == kind && $0["key"] as? String == key }
     }
 
+    /// What the stand-in player page's server saw for media requests (mock-page.js).
+    static func pageLog() -> [[String: Any]] { (call("GET", page + "/_test/log") as? [[String: Any]]) ?? [] }
+
+    static func video(_ id: String, name: String, url: String) -> [String: Any] {
+        let now = Date().timeIntervalSince1970 * 1000
+        return ["kind": "video", "key": id, "updatedAt": now, "value": ["id": id, "name": name, "url": url, "addedAt": now]]
+    }
+
+    static func resume(_ key: String, position: Double, duration: Double, title: String, age: Double = 0) -> [String: Any] {
+        let at = (Date().timeIntervalSince1970 - age) * 1000
+        return ["kind": "resume", "key": key, "updatedAt": at,
+                "value": ["key": key, "position": position, "duration": duration, "title": title, "updatedAt": at]]
+    }
+
     static func tmdbLog() -> [String] { (call("GET", tmdb + "/_test/log") as? [String]) ?? [] }
 
     static func progress(_ type: String, _ id: Int, title: String, position: Double = 600, season: Int? = nil, episode: Int? = nil, age: Double = 0) -> [String: Any] {
@@ -96,12 +111,14 @@ class FeatureTestCase: XCTestCase {
     var email = ""
     /// Subclasses that need the real TMDB (token from Config/Secrets.xcconfig) turn this off.
     class var usesMockTMDB: Bool { true }
+    class var extraArguments: [String] { [] }
 
     override func setUp() {
         continueAfterFailure = false
         Mock.reset()
         app = XCUIApplication()
         app.launchArguments += ["-cf.noCast", "YES", "-cf.resetLibrary", "YES", "-cf.syncServer", Mock.sync]
+        app.launchArguments += Self.extraArguments
         if Self.usesMockTMDB { app.launchArguments += ["-cf.tmdbBase", Mock.tmdb + "/3", "-cf.tmdbToken", "test"] }
         app.launch()
     }
@@ -269,7 +286,7 @@ final class WatchedUITests: FeatureTestCase {
         XCTAssertEqual(check.value as? String, "Watched")
         shot("w03-episode-watched")
         XCTAssertTrue(eventually(30) { Mock.item(email, defaultProfileName, "episode", "tv:8001:1:2")?["deleted"] as? Bool == false }, "episode synced")
-        let p = Mock.item(email, defaultProfileName, "progress", "tv:8001")?["value"] as? [String: Any]
+        let p = Mock.item(email, "Mum", "progress", "tv:8001")?["value"] as? [String: Any]
         XCTAssertEqual(p?["finished"] as? Bool, true, "Continue Watching follows: the saved episode is finished")
 
         check.tap()
@@ -531,5 +548,221 @@ final class KidsRealTMDBUITests: FeatureTestCase {
         XCTAssertTrue(app.staticTexts["No results"].waitForExistence(timeout: 30), "a TV-MA series is hidden")
         field.clearAndType("Bluey")
         XCTAssertTrue(app.buttons["Bluey"].firstMatch.waitForExistence(timeout: 30), "a TV-Y series is found")
+    }
+}
+
+
+/// The Netflix-style card near the end of an episode. Needs a media server that answers /tv/... with a short video:
+///   node scripts/ui-test-servers/mock-media.js <video file>   (port 8160)
+final class NextEpisodeUITests: FeatureTestCase {
+    override class var extraArguments: [String] {
+        ["-cf.streamBase", "http://127.0.0.1:8160", "-cf.streamType", "video", "-cf.nextLead", "11", "-cf.nextMinLength", "5"]
+    }
+
+    private func startEpisode(_ episode: Int) {
+        let ids = signIn(profiles: [["name": "Mum"]])
+        Mock.seed(email, ids["Mum"] ?? "", [Mock.progress("tv", 8001, title: "Kikis Club", position: 1, season: 1, episode: episode)])
+        choose("Mum")
+        // The first tap can land while the picker is still animating in.
+        if !eventually(6, { !app.staticTexts["Who's watching?"].exists }) { app.buttons["profile-Mum"].tap() }
+        goHome()
+        let card = app.buttons["continue-tv:8001"]
+        scrollTo(card, maxSwipes: 2)
+        card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+    }
+
+    @MainActor func testCardCountsDownAndPlaysNextEpisode() throws {
+        startEpisode(1)
+        let title = app.staticTexts["S1:E2  Episode 2 title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 40), "card names the next episode")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] 'Next Episode'")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Starting in'")).firstMatch.exists, "countdown shown")
+        shot("n01-card")
+        // The countdown ends by itself and episode 2 plays: its own card then names episode 3 (not 4, which would mean a skipped episode).
+        XCTAssertTrue(app.staticTexts["S1:E3  Episode 3 title"].waitForExistence(timeout: 40), "episode 2 started after the countdown")
+    }
+
+    @MainActor func testPlayNowAndWatchCredits() throws {
+        startEpisode(1)
+        XCTAssertTrue(app.buttons["Play now"].waitForExistence(timeout: 40))
+        app.buttons["Watch credits"].tap()
+        XCTAssertTrue(eventually(3) { !app.buttons["Play now"].exists }, "card dismissed")
+        // After the video ends the card comes back, without a countdown.
+        XCTAssertTrue(app.buttons["Play now"].waitForExistence(timeout: 30), "static card after the end")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Starting in'")).firstMatch.exists, "no countdown")
+        app.buttons["Play now"].tap()
+        XCTAssertTrue(app.staticTexts["S1:E3  Episode 3 title"].waitForExistence(timeout: 40), "episode 2 started")
+    }
+
+    @MainActor func testLastEpisodeHasNoCard() throws {
+        startEpisode(4)
+        sleep(14)
+        XCTAssertFalse(app.buttons["Play now"].exists, "the last episode has no next card")
+    }
+}
+
+
+/// Saved links remember where they were left, per profile, and sync it. Needs a video of about 400 seconds as "your media server":
+///   node scripts/ui-test-servers/mock-media.js <video of about 400 s>   (port 8160, answers every path with that video)
+final class ResumeUITests: FeatureTestCase {
+    override class var extraArguments: [String] { ["-cf.testClock", "YES"] }
+
+    private let link = "http://127.0.0.1:8160/clip.mp4"
+
+    /// Signs in with one profile that has a saved link (and optionally a saved position) and opens My Videos.
+    private func openVideos(_ extra: [[String: Any]] = []) {
+        let ids = signIn(profiles: [["name": "Mum"]])
+        Mock.seed(email, ids["Mum"] ?? "", [Mock.video("vclip1", name: "Clip", url: link)] + extra)
+        choose("Mum")
+        if !eventually(6, { !app.staticTexts["Who's watching?"].exists }) { app.buttons["profile-Mum"].tap() }
+        goHome()
+        openMyStuff()
+        app.buttons["Videos"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["video-Clip"].waitForExistence(timeout: 20), "saved link listed")
+    }
+
+    private func clock() -> Int { Int(app.staticTexts["player-clock"].firstMatch.label) ?? -1 }
+
+    @MainActor func testResumesFromSyncedPositionSavesAndStartsOver() throws {
+        openVideos([Mock.resume("v:vclip1", position: 60, duration: 400, title: "Clip")])
+        let row = app.buttons["video-Clip"]
+        XCTAssertTrue(row.label.contains("Resume 1:00"), "row shows the synced position: \(row.label)")
+        shot("r01-row")
+        row.tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertTrue(eventually(30) { clock() >= 59 }, "playback starts at the synced position (clock \(clock()))")
+        XCTAssertTrue(eventually(30) { clock() >= 72 }, "and plays on")
+        app.buttons["Close"].tap()
+
+        // The new position goes to the server, as the newest edit.
+        XCTAssertTrue(eventually(40) { ((Mock.item(email, "Mum", "resume", "v:vclip1")?["value"] as? [String: Any])?["position"] as? Double ?? 0) >= 70 }, "new position pushed")
+        let pushed = Mock.item(email, "Mum", "resume", "v:vclip1")?["value"] as? [String: Any]
+        XCTAssertEqual(pushed?["title"] as? String, "Clip")
+        XCTAssertEqual(pushed?["key"] as? String, "v:vclip1")
+        XCTAssertGreaterThan(pushed?["duration"] as? Double ?? 0, 100)
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(eventually(5) { row.label.contains("Resume 1:1") }, "row shows the new position: \(row.label)")
+        shot("r02-after")
+
+        // Start over deletes it everywhere.
+        row.press(forDuration: 1.0)
+        let start = app.buttons["Start over"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "context menu offers Start over")
+        start.tap()
+        XCTAssertTrue(eventually(5) { !row.label.contains("Resume") }, "label gone")
+        XCTAssertTrue(eventually(40) { Mock.item(email, "Mum", "resume", "v:vclip1")?["deleted"] as? Bool == true }, "tombstone pushed")
+    }
+
+    @MainActor func testFinishedVideoDeletesItsPosition() throws {
+        openVideos([Mock.resume("v:vclip1", position: 380, duration: 400, title: "Clip")])
+        app.buttons["video-Clip"].tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertTrue(eventually(30) { clock() >= 379 }, "starts near the end")
+        // The video ends, the player closes by itself and the entry is a tombstone, so the next play starts at 0.
+        XCTAssertTrue(eventually(60) { Mock.item(email, "Mum", "resume", "v:vclip1")?["deleted"] as? Bool == true }, "finished entry deleted")
+        XCTAssertTrue(app.buttons["video-Clip"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["video-Clip"].label.contains("Resume"))
+    }
+
+    @MainActor func testPositionUnderTenSecondsIsNotSaved() throws {
+        openVideos()
+        app.buttons["video-Clip"].tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20))
+        XCTAssertTrue(eventually(30) { clock() >= 4 })
+        app.buttons["Close"].tap()
+        sleep(10)
+        XCTAssertNil(Mock.item(email, "Mum", "resume", "v:vclip1"), "nothing saved before 10 seconds")
+    }
+}
+
+/// "Play natively" for a media server page that plays through a blob: address. Needs the stand-in page server:
+///   node scripts/ui-test-servers/mock-page.js <video.mp4>   (port 8161)
+/// AirPlay and Chromecast to a real receiver are not part of these tests; they cover finding the stream, handing it to AVPlayer with the
+/// page's Referer and cookie, the position and the way back.
+final class NativeSwitchUITests: FeatureTestCase {
+    override class var extraArguments: [String] { ["-cf.testClock", "YES"] }
+
+    private func openPage(_ via: String) {
+        Mock.call("POST", Mock.page + "/_test/clear")
+        app.tabBars.buttons["My Stuff"].tap()
+        app.buttons["Videos"].firstMatch.tap()
+        let add = app.buttons["video-add"]
+        XCTAssertTrue(add.waitForExistence(timeout: 20))
+        add.tap()
+        let name = app.textFields["video-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Page")
+        let link = app.textFields["video-link"]
+        link.tap()
+        link.typeText("\(Mock.page)/page?via=\(via)")
+        app.buttons["video-save"].tap()
+        let row = app.buttons["video-Page"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "saved page listed")
+        row.tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertFalse(app.buttons["play-natively"].exists || app.buttons["back-to-page-top"].exists, "the page is the default, nothing offered before a stream is seen")
+    }
+
+    private func clock() -> Int { Int(app.staticTexts["player-clock"].firstMatch.label) ?? -1 }
+
+    private func nativeRequests(_ path: String) -> [[String: Any]] {
+        Mock.pageLog().filter { $0["path"] as? String == path && $0["native"] as? Bool == true }
+    }
+
+    @MainActor func testBlobPageIsPlayedNativelyWithPageHeaders() throws {
+        openPage("mp4")
+        let button = app.buttons["play-natively"]
+        XCTAssertTrue(button.waitForExistence(timeout: 30), "stream found behind the blob: address")
+        XCTAssertTrue(eventually(30) { clock() >= 3 }, "the page video plays (clock \(clock()))")
+        shot("p01-page")
+        // Not the page's own requests: nothing native has asked for the stream yet.
+        XCTAssertTrue(nativeRequests("/media/clip.mp4").isEmpty)
+        let at = clock()
+        button.tap()
+        XCTAssertTrue(app.buttons["back-to-page-top"].waitForExistence(timeout: 10), "native player shows, with a way back")
+        XCTAssertTrue(eventually(30) { !self.nativeRequests("/media/clip.mp4").isEmpty }, "AVPlayer loaded the real stream address")
+        let request = nativeRequests("/media/clip.mp4").first
+        XCTAssertEqual(request?["ok"] as? Bool, true, "Referer and cookie of the page were sent: \(request ?? [:])")
+        XCTAssertEqual(request?["referer"] as? String, "\(Mock.page)/page?via=mp4")
+        XCTAssertTrue((request?["cookie"] as? String ?? "").contains("sid=test"))
+        XCTAssertTrue(eventually(30) { clock() >= at }, "continues at the page's position \(at), clock \(clock())")
+        sleep(3)
+        XCTAssertGreaterThanOrEqual(clock(), at)
+        shot("p02-native")
+        app.buttons["back-to-page-top"].tap()
+        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30), "back on the page, which offers it again")
+    }
+
+    @MainActor func testHlsMasterIsPreferredAndAFailingStreamOffersThePage() throws {
+        openPage("hls")
+        let button = app.buttons["play-natively"]
+        XCTAssertTrue(button.waitForExistence(timeout: 30), "playlist found")
+        button.tap()
+        // The master playlist is what gets played, not one of its qualities.
+        XCTAssertTrue(eventually(30) { !self.nativeRequests("/hls/master.m3u8").isEmpty }, "AVPlayer asked for the master playlist")
+        XCTAssertEqual(nativeRequests("/hls/master.m3u8").first?["ok"] as? Bool, true)
+        // Its segments do not exist, so native playback fails and the page is offered.
+        let back = app.buttons["back-to-page"]
+        XCTAssertTrue(back.waitForExistence(timeout: 40), "failure offers the page")
+        shot("p03-failed")
+        back.tap()
+        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30), "page again")
+    }
+
+    @MainActor func testStreamFoundThroughXHR() throws {
+        openPage("xhr")
+        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
+    }
+
+    @MainActor func testStreamFoundThroughHlsJsLoadSource() throws {
+        openPage("hlsjs")
+        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
+    }
+
+    @MainActor func testStreamFoundThroughSrcProperty() throws {
+        openPage("src")
+        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
     }
 }

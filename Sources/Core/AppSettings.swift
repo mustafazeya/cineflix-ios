@@ -25,6 +25,8 @@ final class AppSettings {
     var subLangs: String { didSet { save("subLangs", subLangs) } }
     var syncServer: String { didSet { save("syncServer", syncServer) } }
     var hideWatched: Bool { didSet { defaults.set(hideWatched, forKey: "cf.hideWatched") } }
+    /// Play the next episode by itself after a short countdown. Per device.
+    var autoplayNext: Bool { didSet { defaults.set(autoplayNext, forKey: "cf.autoplayNext") } }
     /// Set by the sync layer while a kids profile is active. Not saved: it follows the profile.
     var kidsPolicy: KidsPolicy?
 
@@ -43,6 +45,7 @@ final class AppSettings {
         subLangs = value("subLangs", "EN")
         syncServer = value("syncServer", Self.bundledSync)
         hideWatched = defaults.object(forKey: "cf.hideWatched") as? Bool ?? true
+        autoplayNext = defaults.object(forKey: "cf.autoplayNext") as? Bool ?? true
     }
 
     private func save(_ key: String, _ value: String) { defaults.set(value, forKey: "cf." + key) }

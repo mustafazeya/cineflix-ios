@@ -137,6 +137,14 @@ struct SettingsView: View {
                 Text("Plays {url}/movie/{tmdbId} and {url}/tv/{tmdbId}/{season}/{episode}. The catalog defaults to the Stream URL.")
             }
 
+            Section {
+                Toggle("Autoplay next episode", isOn: $s.autoplayNext)
+            } header: {
+                Text("Playback")
+            } footer: {
+                Text("Near the end of an episode a card offers the next one. With autoplay on it starts after 10 seconds.")
+            }
+
             SyncSettingsSection()
 
             Section("Catalog (TMDB)") {
