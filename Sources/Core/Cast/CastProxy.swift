@@ -11,7 +11,8 @@ nonisolated final class CastProxy: @unchecked Sendable {
     static let shared = CastProxy()
 
     enum Source: Sendable {
-        case url(URL)
+        /// `headers` are what the original page sent (Referer, Cookie, ...) for streams that check them; the receiver cannot send them itself.
+        case url(URL, headers: [String: String] = [:])
         case mega(MegaDownload)
         case subtitles(String)
     }
@@ -84,7 +85,7 @@ nonisolated final class CastProxy: @unchecked Sendable {
         // The extension lets the receiver recognise the stream type from the address.
         let ext: String
         switch source {
-        case .url(let url): ext = url.pathExtension.lowercased()
+        case .url(let url, _): ext = url.pathExtension.lowercased()
         case .mega(let dl): ext = MegaFormat.isVideo(dl.name) ? MegaFormat.ext(dl.name) : "mp4"
         case .subtitles: ext = "vtt"
         }
@@ -109,13 +110,14 @@ nonisolated final class CastProxy: @unchecked Sendable {
         case .mega(let dl):
             let known = fileType(MegaFormat.ext(dl.name))
             return known.isEmpty ? "video/mp4" : known
-        case .url(let url):
+        case .url(let url, let headers):
             let path = url.path.lowercased()
             if path.hasSuffix(".m3u8") { return "application/x-mpegURL" }
             if path.hasSuffix(".mpd") { return "application/dash+xml" }
             let known = fileType(url.pathExtension.lowercased())
             if !known.isEmpty { return known }
             var request = URLRequest(url: url)
+            headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
             request.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
             request.timeoutInterval = 15
             guard let (data, response) = try? await URLSession.shared.data(for: request) else { return "video/mp4" }
@@ -258,9 +260,10 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
         switch source {
         case .subtitles(let text):
             send(status: 200, headers: ["Content-Type": "text/vtt; charset=utf-8"], body: method == "HEAD" ? Data() : Data(text.utf8))
-        case .url(let url):
+        case .url(let url, let extra):
             var request = URLRequest(url: url)
             request.httpMethod = method
+            extra.forEach { request.setValue($1, forHTTPHeaderField: $0) }
             if let range = headers["range"] { request.setValue(range, forHTTPHeaderField: "Range") }
             let task = proxy.session.dataTask(with: request)
             task.delegate = self
@@ -367,18 +370,18 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if error != nil, !headSent { return finish(status: 502) }
-        guard buffering, case .url(let original)? = source else { return close() }
-        let text = rewritePlaylist(String(decoding: body, as: UTF8.self), base: responseURL ?? original)
+        guard buffering, case .url(let original, let headers)? = source else { return close() }
+        let text = rewritePlaylist(String(decoding: body, as: UTF8.self), base: responseURL ?? original, headers: headers)
         send(status: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(text.utf8))
     }
 
     /// Points every URL in an HLS playlist back at this proxy.
-    private func rewritePlaylist(_ text: String, base: URL) -> String {
+    private func rewritePlaylist(_ text: String, base: URL, headers: [String: String]) -> String {
         let attribute = try? NSRegularExpression(pattern: #"URI="([^"]*)""#)
 
         func proxied(_ reference: String) -> String? {
             guard let absolute = URL(string: reference, relativeTo: base)?.absoluteURL, absolute.scheme == "http" || absolute.scheme == "https" else { return nil }
-            return proxy.register(.url(absolute))
+            return proxy.register(.url(absolute, headers: headers))
         }
 
         return text.components(separatedBy: .newlines).map { line in
