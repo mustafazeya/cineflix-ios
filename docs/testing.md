@@ -11,7 +11,7 @@ so they need your keys in `Config/Secrets.xcconfig` and an internet connection.
 | `KidsUITests` | Kids profile filtering, PIN gate, badges, and the profile editor |
 | `KidsRealTMDBUITests` | The kids filter against the live TMDB ratings |
 | `ResumeUITests` | Saved links resume at the synced position, push the new position, "Start over" and finished videos delete it, nothing is saved before 10 seconds |
-| `NativeSwitchUITests` | "Play natively" on a blob: page: stream found by fetch, XHR, `src` and hls.js, master playlist preferred, Referer and cookie sent, position kept, back to the page when native playback fails |
+| `NativeSwitchUITests` | A blob: page plays in the app's own player by itself: stream found by fetch, XHR, `src` and hls.js, master playlist preferred, Referer and cookie sent, one close button, the page player offered once when the stream cannot play, and a page without a stream shown after a few seconds |
 | `SubtitleUITests` | Subtitle search, choosing a result, the subtitle appearing, and turning it off, for a web player page and a native video |
 
 ## Prerequisites

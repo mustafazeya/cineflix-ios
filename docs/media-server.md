@@ -32,10 +32,17 @@ The optional [page bridge](https://github.com/mustafazeya/cineflix-webos/blob/ma
 ## AirPlay and pages that play through MediaSource
 
 Many player pages feed hls.js or MediaSource into a `blob:` address. The iPhone can send the sound of such a page to AirPlay but not the
-picture. While a page is showing, the app watches which stream address it loads (an HLS master playlist, an `.m3u8`, or a `.mp4`, `.webm`
-or `.mov` file), and a **Play natively** button appears in the player's top bar. It opens that address in the native player at the page
-video's position, with the page's Referer, User-Agent and cookies, and AirPlay and Chromecast then show the picture. The page remains
-the default and **Back to page** returns to it. If the stream does not play outside the page, the player says so and offers the page.
+picture. So the app opens a page from your server out of sight (muted, behind a loading screen) and watches which stream address it loads
+(an HLS master playlist, an `.m3u8`, or a `.mp4`, `.webm` or `.mov` file). Once found, that stream plays in the native player by itself, at
+the saved position, fetched through the phone with the page's Referer, User-Agent and cookies, so AirPlay and Chromecast show the picture.
+There is nothing to tap. The app also presses the page's own play button (muted, out of sight), because many players only load the video once
+play is pressed. A stream is recognised by what it is, not by its name: an address given to a video element, an address named inside one of
+the page's own JSON answers, and anything the browser loads for a video element are all looked at (first bytes only, with what the page sent), so
+playlists called `.txt` or nothing at all, and files with no ending, are found. A page that is still busy is given up to 45 seconds; one that
+has gone quiet is shown after about 12. Then the page itself is shown, with a small selectable note saying what it loaded (requests, the state
+of its video, any iframe, whether it assembles the video in pieces). If a stream does not play, the player says why (for example `HTTP 403 from
+your-server master.m3u8`) and falls back to the page player on its own. A file of a few hundred bytes is ignored: it is the first piece of a stream
+the page assembles itself, which only the page can play.
 
 This works for streams a plain player can fetch. A stream that needs a token the page builds in JavaScript on every request, is protected
 (DRM) or is only reachable through the page's own scripts will not play natively. AirPlay hands the address to the Apple TV, which fetches

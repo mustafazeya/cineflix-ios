@@ -46,8 +46,8 @@ install-iphone.sh        build and install on paired iPhones
   too long or has other characters becomes an FNV-1a (32 bit, hex) hash. Past 95% the entry is deleted, so the next play starts at 0.
   A sync cursor reset (`schema` in `SyncService`) makes existing accounts download the new kind once.
 - A page that plays through MediaSource or `blob:` cannot send its picture to AirPlay. The injected stream script reports the real stream
-  address (the master playlist is preferred over its quality playlists) and "Play natively" opens it in AVPlayer with the page's Referer,
-  User-Agent and cookies. The Chromecast proxy sends the same headers when it fetches that stream for the TV. Only what the page does through
+  address (the master playlist is preferred over its quality playlists). The page is opened out of sight; once a stream is seen it plays in
+  AVPlayer, through the phone's own server (`CastProxy`) so every request carries the page's Referer, User-Agent and cookies. The Chromecast proxy sends the same headers when it fetches that stream for the TV. Only what the page does through
   XMLHttpRequest, fetch, `src` and hls.js is seen; AirPlay itself fetches the address from the Apple TV without those headers.
 - The Search tab's search field uses `.searchable` with `.navigationBarDrawer(displayMode: .always)` inside a `NavigationStack`; without that it does not show.
 - Deployment target is iOS 26 even though the SDK is iOS 27, so current iPhones on iOS 26 can run it.
