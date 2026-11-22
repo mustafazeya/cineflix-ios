@@ -9,6 +9,7 @@
 //   /page?via=xhr     the same with XMLHttpRequest
 //   /page?via=hls     fetch master.m3u8 and both quality playlists, then play a blob (the "segments" are not real, native playback fails)
 //   /page?via=hlsjs   like hls, but through a fake window.Hls defined late, with loadSource(url)
+//   /page?via=late    no stream at all; 9 s in, an iframe with a plain <video> appears and reports its muted state (GET /_test/log, path /frame-state)
 //   /page?via=src     video.src = '/media/clip.mp4' set directly, and a <source> element
 //
 // The stream and the playlists only answer a request that carries the page's Referer and its cookie, so the native player has to pass
@@ -43,7 +44,13 @@ function playlists(master) {
     return Promise.all(rel.map(function (r) { return text(new URL(r, new URL(master, location.href)).href); }));
   });
 }
-if (via === 'mp4' || via === 'xhr') bytes('/media/clip.mp4').then(playBlob);
+if (via === 'noext') { v.src = '/media/clip'; status('src set without a file name'); }
+else if (via === 'api') fetch('/api/info').then(function (r) { return r.json(); }).then(function () { return bytes('/media/clip.dat'); }).then(playBlob);
+else if (via === 'busy') { var pings = 0; var t = setInterval(function () { fetch('/api/ping?i=' + pings); if (++pings >= 9) { clearInterval(t); bytes('/media/clip.mp4').then(playBlob); } }, 1000); }
+else if (via === 'lazy') { var big = document.createElement('div'); big.className = 'vjs-big-play-button'; big.style.cssText = 'width:80px;height:80px;background:#444'; big.onclick = function () { bytes('/media/clip.mp4').then(playBlob); }; document.body.appendChild(big); }
+else if (via === 'hlstxt') text('/hls/master.txt').then(function () { return bytes('/media/clip.dat'); }).then(playBlob);
+else if (via === 'initseg') bytes('/media/init.mp4').then(function () { return bytes('/media/clip.dat'); }).then(playBlob);
+else if (via === 'mp4' || via === 'xhr') bytes('/media/clip.mp4').then(playBlob);
 else if (via === 'hls') playlists('/hls/master.m3u8').then(function () { return bytes('/media/clip.dat'); }).then(playBlob);
 else if (via === 'hlsjs') setTimeout(function () {
   window.Hls = function () {};
@@ -51,6 +58,7 @@ else if (via === 'hlsjs') setTimeout(function () {
   window.Hls.prototype.loadSource = function (u) { playlists(u).then(function () { return bytes('/media/clip.dat'); }).then(playBlob); };
   var h = new window.Hls(); h.attachMedia(v); h.loadSource('/hls/master.m3u8');
 }, 300);
+else if (via === 'late') setTimeout(function () { var f = document.createElement('iframe'); f.src = '/frame'; f.style.cssText = 'width:100%;height:200px;border:0'; document.body.appendChild(f); }, 9000);
 else if (via === 'src') { v.src = '/media/clip.mp4'; var s = document.createElement('source'); s.src = '/media/clip.mp4'; v.appendChild(s); status('src set'); }
 </script></body></html>`;
 
@@ -66,18 +74,37 @@ http.createServer((req, res) => {
   const path = url.pathname;
   if (path === '/_test/log') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(log)); }
   if (path === '/_test/clear') { log = []; res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{}'); }
+  if (path === '/frame') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end('<!doctype html><body style="margin:0;background:#222"><video id="v" playsinline controls style="width:100%"></video><script>setInterval(function () { fetch("/frame-state?muted=" + document.getElementById("v").muted); }, 500);</script>');
+  }
+  if (path === '/frame-state') { log.push({ path: '/frame-state', muted: url.searchParams.get('muted') === 'true', at: Date.now() }); res.writeHead(200); return res.end(); }
   if (path === '/page') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': 'sid=test; Path=/' });
     return res.end(PAGE);
   }
+  // The page's own data: the stream address sits inside a JSON answer (with escaped slashes, as many APIs write them), and a ping that keeps the page busy.
+  if (path === '/api/info') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ data: { stream: `http://${req.headers.host}/media/clip.mp4` } }).replace(/\//g, '\\/'));
+  }
+  if (path === '/api/ping') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end('{}'); }
   if (path.startsWith('/media/') || path.startsWith('/hls/')) {
     const ok = allowed(req);
     log.push({ path, ok, referer: req.headers.referer || '', ua: req.headers['user-agent'] || '', cookie: req.headers.cookie || '',
-               native: !!req.headers['x-playback-session-id'], range: req.headers.range || '' });
+               native: !req.headers['sec-fetch-mode'] && !req.headers['sec-fetch-dest'], range: req.headers.range || '' });
     if (!ok) { res.writeHead(403); return res.end('Referer and cookie of the page required'); }
+    if (path === '/hls/master.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(MASTER); }
     if (path === '/hls/master.m3u8') { res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' }); return res.end(MASTER); }
     if (/^\/hls\/v\d+\.m3u8$/.test(path)) { res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' }); return res.end(VARIANT); }
-    if (path === '/media/clip.mp4' || path === '/media/clip.dat') {
+    if (path === '/media/init.mp4') {
+      // The first piece of a stream the page assembles itself: a 1210 byte file that starts like an MP4 and has no pictures in it.
+      const tiny = Buffer.alloc(1210); tiny.write('\u0000\u0000\u0000\u0018ftypisom', 0, 'latin1');
+      const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
+      if (range) { res.writeHead(206, { 'content-type': 'video/mp4', 'content-range': 'bytes 0-' + (range[2] ? Math.min(Number(range[2]), 1209) : 1209) + '/1210', 'content-length': 1 }); return res.end(tiny.subarray(0, 1)); }
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': 1210 }); return res.end(tiny);
+    }
+    if (path === '/media/clip.mp4' || path === '/media/clip.dat' || path === '/media/clip') {
       const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
       let start = 0, end = size - 1, status = 200;
       if (range) { if (range[1]) start = Number(range[1]); if (range[2]) end = Math.min(Number(range[2]), size - 1); status = 206; }

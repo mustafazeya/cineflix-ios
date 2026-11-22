@@ -20,7 +20,21 @@ struct PlayerScreen: View {
     @State private var track = PositionTrack()
 
     /// The playing position, kept outside @State so its quarter-second updates do not redraw the screen.
-    final class PositionTrack { var position = 0.0; var duration = 0.0; var clockWeight = 0.0; var clockAt = Date.distantPast }
+    final class PositionTrack {
+        var position = 0.0; var duration = 0.0; var clockWeight = 0.0; var clockAt = Date.distantPast
+        var paused = false
+        var touchedAt = Date()
+        /// The hidden page last did something (a request, a video loading), and how many addresses are being looked at.
+        var pageActiveAt = Date()
+        var probing = 0
+        /// The system player's own controls were seen: our buttons then follow them exactly instead of a timer.
+        var followsSystem = false
+    }
+
+    /// Our buttons over the video. They fade out a few seconds after the last touch (like the system player's own controls underneath)
+    /// and come back on a touch, or while the next-episode card is up, the video is paused, or something needs attention.
+    @State private var chromeVisible = true
+    private static let chromeSeconds = 4.0
 
     /// Stream addresses the web page loaded its media from, so the page's video can be played natively (AirPlay, Chromecast).
     @State private var streams = StreamPicker()
@@ -28,8 +42,26 @@ struct PlayerScreen: View {
     /// Set while the native player shows a stream found on a web page: the page to go back to, and how the page loaded the stream.
     @State private var pageURL: URL?
     @State private var nativeStream: NativeStream?
+    /// The stream plays through this phone's own web server, which adds the page's Referer, cookies and User-Agent to every request.
+    @State private var nativeViaPhone = false
+    /// The stream failed through the phone, so it was tried straight from the server (with the page's headers) before giving up.
+    @State private var triedDirect = false
+    @State private var playerEpoch = 0
+    /// Why the app's own player was given up on, shown for a few seconds over the page player it fell back to.
+    @State private var fallbackNote = ""
+    /// What the hidden page loaded, in a few words per request.
+    @State private var pageTrace = ""
+    @State private var nativeError = ""
+    /// A server page is opened out of sight first: its stream is found and played in the app's own player. The page itself only comes forward
+    /// when no stream shows up in time (it may need a tap on its play button) or when the app's player could not play the stream.
+    @State private var pageRevealed = false
+    /// The app's own player was tried and failed (or the page was asked for): stop switching to it by itself.
+    @State private var preferPage = false
+    private static var pageWait: Double { UserDefaults.standard.object(forKey: "cf.pageReveal") == nil ? 12 : UserDefaults.standard.double(forKey: "cf.pageReveal") }
     @State private var nativeFailed = false
     private static let showClock = UserDefaults.standard.bool(forKey: "cf.testClock")
+    /// Diagnostics (why the page player was used, what the page loaded) are only drawn on request: `-cf.showPageNote YES`.
+    private static let showNote = UserDefaults.standard.bool(forKey: "cf.showPageNote")
 
     struct Ending: Equatable { var deadline: Date?; var finished = false }
     @State private var upNext: UpNext?
@@ -56,26 +88,39 @@ struct PlayerScreen: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .video(let url):
-                VideoPlayerView(subtitles: subtitles, url: url, access: nativeStream?.url == url ? nativeStream : nil, resume: request.resume,
-                                onProgress: { [id = request.id] p, d in progressed(p, d, for: id) }, onClock: { subtitles.setClock(position: $0, paused: $1); track.position = $0 },
+                VideoPlayerView(subtitles: subtitles, url: url, access: !nativeViaPhone && nativeStream?.url == url ? nativeStream : nil, resume: request.resume,
+                                onProgress: { [id = request.id] p, d in progressed(p, d, for: id) }, onClock: { subtitles.setClock(position: $0, paused: $1); track.position = $0; track.paused = $1 },
                                 onEnd: { [id = request.id] in ended(for: id) },
-                                onFail: pageURL == nil ? nil : { [id = request.id] in if id == request.id { nativeFailed = true } })
+                                onTouch: touched, onControls: systemControls,
+                                onFail: pageURL == nil ? nil : { [id = request.id] in if id == request.id { nativeFailed(url) } },
+                                onFailDetail: { nativeError = $0 })
                     .ignoresSafeArea()
-                    .id(request.id)
+                    .id("\(request.id)-\(playerEpoch)")
                 if nativeFailed, pageURL != nil { nativeFailure }
             case .mega(let dl, let local):
                 VideoPlayerView(subtitles: subtitles, url: local ?? dl.url, mega: local == nil ? dl : nil, resume: request.resume, onProgress: { [id = request.id] p, d in progressed(p, d, for: id) },
-                                onClock: { p, _ in track.position = p }, onEnd: { [id = request.id] in ended(for: id) },
+                                onClock: { p, paused in track.position = p; track.paused = paused }, onEnd: { [id = request.id] in ended(for: id) }, onTouch: touched, onControls: systemControls,
                                 onFail: local == nil ? nil : { phase = .mega(dl, local: nil) })
                     .ignoresSafeArea()
                     .id(request.id)
             case .page(let url):
-                WebPlayerView(url: url, cues: subtitles.cues, offset: subtitles.offset, resume: request.resume, control: pageControl,
-                              onProgress: { [id = request.id] p, d in progressed(p, d, for: id) },
-                              onClock: { pageClock(position: $0, paused: $1, weight: $2) }, onEnd: { [id = request.id] in ended(for: id) }, onClose: { dismiss() },
-                              onStream: { [id = request.id] found in if id == request.id { streams.offer(found) } })
-                    .ignoresSafeArea()
-                    .id(request.id)
+                ZStack {
+                    WebPlayerView(url: url, cues: subtitles.cues, offset: subtitles.offset, resume: request.resume, control: pageControl,
+                                  onProgress: { [id = request.id] p, d in progressed(p, d, for: id) },
+                                  onClock: { pageClock(position: $0, paused: $1, weight: $2) }, onEnd: { [id = request.id] in ended(for: id) }, onClose: { dismiss() },
+                                  onStream: { [id = request.id] found in
+                                      guard id == request.id else { return }
+                                      if found.kind == .candidate { probe(found) } else { streams.offer(found) }
+                                  },
+                                  onTrace: { [id = request.id] t, active in
+                                      guard id == request.id else { return }
+                                      pageTrace = t
+                                      if active { track.pageActiveAt = Date() }
+                                  }, onTouch: touched)
+                        .ignoresSafeArea()
+                        .id(request.id)
+                    if !pageRevealed { preparing }
+                }
             case .failed(let message):
                 VStack(spacing: 16) {
                     Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundStyle(Theme.text2)
@@ -88,6 +133,17 @@ struct PlayerScreen: View {
             }
 
             if !isNativeVideo && !casting { SubtitleOverlay(controller: subtitles) }
+
+            if Self.showNote, !fallbackNote.isEmpty, case .page = phase {
+                VStack {
+                    Spacer()
+                    Text((fallbackNote.hasPrefix("Page loaded") || fallbackNote.hasPrefix("The page loaded") ? "Playing in the page player: no stream found.\n" : "Played in the page player instead.\n") + fallbackNote)
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.leading)
+                        .padding(10).background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 30).textSelection(.enabled)
+                        .accessibilityIdentifier("fallback-note")
+                }
+                .allowsHitTesting(false)
+            }
 
             if Self.showClock {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
@@ -112,31 +168,18 @@ struct PlayerScreen: View {
             }
 
             HStack {
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 38, height: 38)
+                // The system player shows its own close button and AirPlay button in its controls; ours would sit on top of them.
+                if !isNativeVideo || casting {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                    }
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .accessibilityLabel("Close")
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .accessibilityLabel("Close")
                 Spacer()
-                if case .page = phase, !casting, let found = streams.best {
-                    Button { playNatively(found) } label: {
-                        Label("Play natively", systemImage: "play.rectangle").font(.system(size: 14, weight: .semibold)).padding(.horizontal, 6).frame(height: 38)
-                    }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.capsule)
-                    .accessibilityIdentifier("play-natively")
-                }
-                if let pageURL, case .video = phase, !casting {
-                    Button { backToPage(pageURL) } label: {
-                        Label("Back to page", systemImage: "arrow.uturn.backward").font(.system(size: 14, weight: .semibold)).padding(.horizontal, 6).frame(height: 38)
-                    }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.capsule)
-                    .accessibilityIdentifier("back-to-page-top")
-                }
                 if (isNativeVideo || casting), cast.hasDevices || cast.hasSession {
                     PlayerControl { CastButton() }.accessibilityLabel("Cast")
                 }
@@ -147,9 +190,6 @@ struct PlayerScreen: View {
                     .buttonStyle(.glass)
                     .buttonBorderShape(.circle)
                     .accessibilityLabel("Next episode")
-                }
-                if airPlayable, !casting {
-                    PlayerControl { AirPlayButton() }.accessibilityLabel("AirPlay")
                 }
                 if settings.hasSubDL, !isFailed, !request.isCustom {
                     Button { showSubtitles = true } label: {
@@ -162,14 +202,24 @@ struct PlayerScreen: View {
                     .accessibilityLabel("Subtitles")
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.leading, 16)
+            // The system player keeps its speaker button at the top right and its own buttons at the top left; ours sit between them.
+            .padding(.trailing, isNativeVideo && !casting ? 72 : 16)
+            .padding(.top, isNativeVideo && !casting ? -3 : 8)
+            .opacity(chromeShown ? 1 : 0)
+            .allowsHitTesting(chromeShown)
+            .simultaneousGesture(TapGesture().onEnded { touched() })
+            .animation(.easeOut(duration: 0.25), value: chromeShown)
         }
         .sheet(isPresented: $showSubtitles) { SubtitleSheet(request: request, controller: subtitles) }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
         .task(id: request.id) { await resolve() }
         .task(id: request.id) { await watchEnding() }
+        .task { await watchChrome() }
+        .task(id: request.id) { await revealPageSoon() }
+        .task(id: streams.best) { await playFoundStream() }
+        .onChange(of: pageRevealed) { _, shown in pageControl.mute?(!shown) }
         .animation(.easeOut(duration: 0.25), value: ending)
         .onChange(of: cast.hasSession) { _, connected in
             if connected { if !casting { startCasting() } } else if casting { backToPhone() }
@@ -197,9 +247,14 @@ struct PlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundStyle(Theme.text2)
             Text("This stream doesn't play outside the page.").multilineTextAlignment(.center).foregroundStyle(Theme.text2)
-            Button("Back to page") { if let pageURL { backToPage(pageURL) } }
-                .buttonStyle(.glass)
-                .accessibilityIdentifier("back-to-page")
+            if Self.showNote, !nativeError.isEmpty { Text(nativeError).font(.caption).multilineTextAlignment(.center).foregroundStyle(Theme.dim).textSelection(.enabled) }
+            if Self.showNote, !CastProxy.shared.trace.isEmpty { Text(CastProxy.shared.trace).font(.system(size: 10, design: .monospaced)).multilineTextAlignment(.leading).foregroundStyle(Theme.dim).textSelection(.enabled) }
+            HStack(spacing: 12) {
+                Button("Open page player") { if let pageURL { backToPage(pageURL) } }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("back-to-page")
+                Button("Close") { dismiss() }.buttonStyle(.glass)
+            }
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -213,6 +268,145 @@ struct PlayerScreen: View {
             track.position = position
             track.clockWeight = weight
             track.clockAt = Date()
+            track.paused = paused
+        }
+    }
+
+    /// Shown over the page while its stream is being found.
+    private var preparing: some View {
+        VStack(spacing: 14) {
+            ProgressView().tint(.white).controlSize(.large)
+            Text(request.title).font(.headline)
+            if let s = request.subtitle { Text(s).font(.subheadline).foregroundStyle(Theme.dim) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.ignoresSafeArea())
+    }
+
+    private func revealPageSoon() async {
+        // A page that is still busy (requests going out, its video loading) gets more time: it is the app's own player the viewer wants, and
+        // showing the page's loading screen only to switch away from it a moment later is worse than waiting. A page that has gone quiet is
+        // shown after the normal wait, and the longest any page is given is 45 seconds.
+        let started = Date()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard case .page = phase, !pageRevealed else { return }
+            if streams.best != nil || track.probing > 0 { continue }
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed >= Self.pageWait && (Date().timeIntervalSince(track.pageActiveAt) >= 6 || elapsed >= 45) { break }
+        }
+        guard !Task.isCancelled, case .page = phase else { return }
+        pageRevealed = true
+        // No stream was found, so the page it is: say what it loaded, because that is what shows why nothing playable turned up.
+        if streams.best == nil {
+            fallbackNote = (streams.rejectedNotes + [pageTrace.isEmpty ? "The page loaded no media." : "Page loaded:\n" + pageTrace]).joined(separator: "\n")
+            try? await Task.sleep(for: .seconds(20))
+            fallbackNote = ""
+        }
+    }
+
+    /// The page's stream is known: after a moment (a master playlist may follow a quality playlist) it plays in the app's own player.
+    private func playFoundStream() async {
+        guard let found = streams.best else { return }
+        try? await Task.sleep(for: .milliseconds(1200))
+        guard !Task.isCancelled, case .page = phase, !preferPage, let best = streams.best, best.url == found.url else { return }
+        // A file of a few hundred bytes is not a video: it is the first piece of a stream the page puts together itself, and the page's own
+        // player is the only thing that can play that. Leave it to the page.
+        if best.kind == .file {
+            let stream = NativeStream(url: best.url, referer: best.referer, userAgent: best.userAgent, cookies: await pageControl.cookies(for: best.url))
+            if let size = await Self.fileSize(of: stream), size < Self.minimumVideoBytes {
+                streams.reject(best.url, because: "Ignored \(best.url.lastPathComponent): a file of only \(size) bytes is not a video.")
+                return
+            }
+        }
+        playNatively(best)
+    }
+
+    private static let minimumVideoBytes: Int64 = 200_000
+
+    /// An address whose kind is not known by its name: read its first bytes (with what the page sent) and see what it is.
+    private func probe(_ found: DetectedStream) {
+        guard streams.shouldProbe(found.url) else { return }
+        let id = request.id
+        track.probing += 1
+        Task {
+            let stream = NativeStream(url: found.url, referer: found.referer, userAgent: found.userAgent, cookies: await pageControl.cookies(for: found.url))
+            let kind = await Self.classify(found, stream)
+            track.probing -= 1
+            guard id == request.id, case .page = phase else { return }
+            if let kind { streams.offer(kind) }
+        }
+    }
+
+    /// nil when the address is not a playlist or a video file the iPhone can play.
+    private static func classify(_ found: DetectedStream, _ stream: NativeStream) async -> DetectedStream? {
+        var request = URLRequest(url: found.url, timeoutInterval: 12)
+        for (name, value) in stream.proxyHeaders { request.setValue(value, forHTTPHeaderField: name) }
+        request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
+        guard let (bytes, response) = try? await URLSession.shared.bytes(for: request), let http = response as? HTTPURLResponse, http.statusCode < 400 else { return nil }
+        var head = [UInt8]()
+        do { for try await byte in bytes { head.append(byte); if head.count >= 4096 { break } } } catch {}
+        func make(_ kind: DetectedStream.Kind, _ variants: Set<URL> = []) -> DetectedStream {
+            DetectedStream(url: found.url, kind: kind, variants: variants, referer: found.referer, userAgent: found.userAgent)
+        }
+        let text = String(decoding: head, as: UTF8.self)
+        if text.trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}\n\r\t ")).hasPrefix("#EXTM3U") {
+            guard text.contains("#EXT-X-STREAM-INF") else { return make(text.contains("#EXTINF") ? .media : .hls) }
+            var variants = Set<URL>()
+            var next = false
+            for line in text.components(separatedBy: .newlines).map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                if line.hasPrefix("#EXT-X-STREAM-INF") { next = true; continue }
+                if next, !line.isEmpty, !line.hasPrefix("#"), let url = URL(string: line, relativeTo: found.url)?.absoluteURL { variants.insert(url); next = false }
+            }
+            return make(.master, variants)
+        }
+        if head.count >= 8 {
+            let tag = String(decoding: head[4..<8], as: UTF8.self)
+            if ["ftyp", "moov", "mdat", "styp", "free", "wide"].contains(tag) { return make(.file) }
+        }
+        if head.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) { return make(.file) }
+        return nil
+    }
+
+    /// The size of the file behind a stream address, read from the first byte's answer. nil when the server does not say.
+    private static func fileSize(of stream: NativeStream) async -> Int64? {
+        var request = URLRequest(url: stream.url, timeoutInterval: 10)
+        for (name, value) in stream.proxyHeaders { request.setValue(value, forHTTPHeaderField: name) }
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        guard let (_, response) = try? await URLSession.shared.bytes(for: request), let http = response as? HTTPURLResponse else { return nil }
+        if let range = http.value(forHTTPHeaderField: "Content-Range"), let total = range.split(separator: "/").last.flatMap({ Int64($0) }) { return total }
+        if http.statusCode == 200, let length = http.value(forHTTPHeaderField: "Content-Length").flatMap({ Int64($0) }) { return length }
+        return nil
+    }
+
+    private func touched() {
+        track.touchedAt = Date()
+        if !track.followsSystem, !chromeVisible { chromeVisible = true }
+    }
+
+    /// The system controls came or went; our buttons do the same, so the two never disagree.
+    private func systemControls(visible: Bool) {
+        track.followsSystem = true
+        if chromeVisible != visible { chromeVisible = visible }
+    }
+
+    /// Only a playing video hides our buttons. Anything that needs the viewer (the next-episode card, a pause, an error, a TV remote) shows them.
+    private var preparingPage: Bool { if case .page = phase { !pageRevealed } else { false } }
+
+    private var chromeShown: Bool {
+        if chromeVisible || casting || ending != nil || preparingPage { return true }
+        switch phase {
+        case .video, .mega, .page: return false
+        default: return true
+        }
+    }
+
+    private func watchChrome() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(400))
+            if track.followsSystem, isNativeVideo, !casting { continue }
+            if casting || ending != nil || track.paused || showSubtitles || preparingPage { track.touchedAt = Date(); if !chromeVisible { chromeVisible = true }; continue }
+            if chromeVisible, Date().timeIntervalSince(track.touchedAt) > Self.chromeSeconds { chromeVisible = false }
         }
     }
 
@@ -220,22 +414,53 @@ struct PlayerScreen: View {
     /// can then show the picture. Nothing else changes: the page stays the default, and the way back is one tap.
     private func playNatively(_ found: DetectedStream) {
         guard case .page(let page) = phase else { return }
+        touched()
         Task {
             let stream = NativeStream(url: found.url, referer: found.referer, userAgent: found.userAgent, cookies: await pageControl.cookies(for: found.url))
             guard case .page = phase else { return }
             nativeStream = stream
             nativeFailed = false
+            nativeError = ""
+            triedDirect = false
             pageURL = page
             request.resume = track.position
-            phase = .video(found.url)
+            // The phone fetches the stream itself and adds what the page sent on every request, so servers that check the Referer or cookies
+            // still answer, for its own player and for an AirPlay receiver (which fetches from the phone, not from the server).
+            let viaPhone = await CastProxy.shared.publish(.url(found.url, headers: stream.proxyHeaders), playlist: found.kind != .file)
+            nativeViaPhone = viaPhone != nil
+            phase = .video(viaPhone ?? found.url)
             startCasting()
         }
     }
 
+    /// The app's player could not play the stream. Through the phone failed: try it straight from the server once, then give up.
+    private func nativeFailed(_ url: URL) {
+        if nativeViaPhone, !triedDirect, let original = nativeStream?.url {
+            triedDirect = true
+            nativeViaPhone = false
+            playerEpoch += 1
+            phase = .video(original)
+            return
+        }
+        // Both ways failed. The page's own player can usually still play it (it decodes the video itself), so go there instead of stopping.
+        if let page = pageURL, !preferPage {
+            let trace = CastProxy.shared.trace
+            fallbackNote = [nativeError, trace, pageTrace.isEmpty ? "" : "Page loaded:\n" + pageTrace].filter { !$0.isEmpty }.joined(separator: "\n")
+            backToPage(page)
+            Task { try? await Task.sleep(for: .seconds(12)); fallbackNote = "" }
+            return
+        }
+        nativeFailed = true
+    }
+
     private func backToPage(_ page: URL) {
+        touched()
+        pageRevealed = true
+        preferPage = true
         request.resume = track.position
         nativeFailed = false
         nativeStream = nil
+        nativeViaPhone = false
         pageURL = nil
         phase = .page(page)
     }
@@ -247,7 +472,7 @@ struct PlayerScreen: View {
         guard !localOnly, cast.hasSession else { return }
         let source: CastProxy.Source
         switch phase {
-        case .video(let url): source = .url(url, headers: nativeStream?.proxyHeaders ?? [:])
+        case .video(let url): source = .url(nativeStream?.url ?? url, headers: nativeStream?.proxyHeaders ?? [:])
         case .mega(let download, _): source = .mega(download)
         default: return
         }
@@ -303,6 +528,14 @@ struct PlayerScreen: View {
     }
 
     private func resolve() async {
+        touched()
+        pageRevealed = false
+        preferPage = false
+        pageTrace = ""
+        track.pageActiveAt = Date()
+        track.probing = 0
+        track.followsSystem = false
+        streams.reset()
         upNext = nil
         ending = nil
         creditsChosen = false
@@ -461,6 +694,27 @@ struct PlayerScreen: View {
     }
 }
 
+/// Hears every touch on a view without taking part in it, so the video's own controls keep working. The player uses it to know when to bring its buttons back.
+final class TouchWatcher: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    private let onTouch: () -> Void
+
+    init(_ onTouch: @escaping () -> Void) {
+        self.onTouch = onTouch
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        onTouch()
+        state = .failed
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
 // MARK: - Native player
 
 struct VideoPlayerView: UIViewControllerRepresentable {
@@ -473,7 +727,12 @@ struct VideoPlayerView: UIViewControllerRepresentable {
     let onProgress: (Double, Double) -> Void
     let onClock: (Double, Bool) -> Void
     let onEnd: () -> Void
+    var onTouch: (() -> Void)?
+    /// Whether the system player's own controls are on screen. Called when that changes.
+    var onControls: ((Bool) -> Void)?
     var onFail: (() -> Void)?
+    /// What went wrong, in words (HTTP status of the failing request, or the player's own message), shown so a refused stream can be understood.
+    var onFailDetail: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -482,6 +741,8 @@ struct VideoPlayerView: UIViewControllerRepresentable {
         vc.allowsPictureInPicturePlayback = true
         vc.canStartPictureInPictureAutomaticallyFromInline = true
         vc.player = context.coordinator.start()
+        if let onTouch { vc.view.addGestureRecognizer(TouchWatcher(onTouch)) }
+        if let onControls { context.coordinator.watchControls(of: vc, onControls) }
         // The video's own overlay layer stays on screen in the player's full screen mode, unlike our SwiftUI view.
         let host = UIHostingController(rootView: SubtitleOverlay(controller: subtitles))
         host.view.backgroundColor = .clear
@@ -529,10 +790,44 @@ struct VideoPlayerView: UIViewControllerRepresentable {
             let player = AVPlayer(playerItem: item)
             self.player = player
 
+            // Nothing playing 25 seconds in, and no error either: say so instead of leaving a black screen.
+            watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let player = self.player, player.timeControlStatus != .playing, !self.stalledReported else { return }
+                    self.stalledReported = true
+                    let reason = player.reasonForWaitingToPlay?.rawValue ?? "no reason given"
+                    self.parent.onFailDetail?("Nothing started playing after 25 seconds (\(reason)).")
+                    self.parent.onFail?()
+                }
+            }
+
             statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 Task { @MainActor in
-                    if item.status == .failed { self?.parent.onFail?(); return }
+                    if item.status == .failed {
+                        let event = item.errorLog()?.events.last { $0.errorStatusCode != 0 }
+                        var detail = item.error?.localizedDescription ?? "Playback failed."
+                        if let error = item.error as NSError? {
+                            // The code is what tells a refused request from an unreadable stream.
+                            let underlying = (error.userInfo[NSUnderlyingErrorKey] as? NSError).map { " > \($0.domain) \($0.code)" } ?? ""
+                            detail += " (\(error.domain) \(error.code)\(underlying))"
+                        }
+                        if let event {
+                            let uri = event.uri.flatMap(URL.init(string:))
+                            detail = "HTTP \(event.errorStatusCode) from \(uri?.host ?? "the server")" + (uri.map { " " + $0.lastPathComponent } ?? "")
+                        } else if let problem = CastProxy.shared.lastProblem {
+                            detail = problem + " - " + detail
+                        }
+                        self?.parent.onFailDetail?(detail)
+                        self?.parent.onFail?()
+                        return
+                    }
                     guard let self, item.status == .readyToPlay, !self.didSeek else { return }
+                    // A file whose video the iPhone cannot decode still "plays": the sound runs under a black screen, with no error at all.
+                    if let problem = await Self.videoProblem(of: item.asset) {
+                        self.parent.onFailDetail?(problem)
+                        self.parent.onFail?()
+                        return
+                    }
                     self.didSeek = true
                     let duration = item.duration.seconds
                     if self.parent.resume > 5, duration.isFinite, self.parent.resume < duration - 10 {
@@ -566,7 +861,57 @@ struct VideoPlayerView: UIViewControllerRepresentable {
             return player
         }
 
+        private var controlsTimer: Timer?
+        private var watchdog: Timer?
+        private var stalledReported = false
+        private var controlsShown: Bool?
+
+        /// Reads whether the system controls are showing from the dimming layer they fade in over the video (alpha 0 hidden, 1 shown), or
+        /// from their container being hidden. These are the player's own views, found by name: if a later iOS renames them nothing is
+        /// reported and the player screen keeps hiding its buttons on a timer instead.
+        func watchControls(of vc: AVPlayerViewController, _ report: @escaping (Bool) -> Void) {
+            controlsTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self, weak vc] _ in
+                guard let self, let root = vc?.view, let visible = Self.controlsVisible(in: root), visible != self.controlsShown else { return }
+                self.controlsShown = visible
+                report(visible)
+            }
+        }
+
+        private static func controlsVisible(in root: UIView) -> Bool? {
+            var dimming: UIView?
+            var container: UIView?
+            func walk(_ view: UIView) {
+                let name = String(describing: type(of: view))
+                if dimming == nil, name.hasSuffix("BackgroundDimmingView") { dimming = view }
+                if container == nil, name.hasSuffix("ControlsView"), name.hasPrefix("AV") { container = view }
+                if dimming == nil || container == nil { view.subviews.forEach(walk) }
+            }
+            walk(root)
+            if let dimming { return dimming.alpha > 0.4 }
+            if let container { return !container.isHidden }
+            return nil
+        }
+
+        /// nil when the asset has a video track the phone can decode, otherwise what is wrong with it.
+        private static func videoProblem(of asset: AVAsset) async -> String? {
+            guard let tracks = try? await asset.loadTracks(withMediaType: .video) else { return nil }
+            if tracks.isEmpty { return "The file has no video, only sound." }
+            for track in tracks {
+                if (try? await track.load(.isDecodable)) ?? true { return nil }
+            }
+            var codec = "unknown"
+            if let first = tracks.first, let formats = try? await first.load(.formatDescriptions), let format = formats.first {
+                let code = CMFormatDescriptionGetMediaSubType(format)
+                codec = String(bytes: [UInt8((code >> 24) & 255), UInt8((code >> 16) & 255), UInt8((code >> 8) & 255), UInt8(code & 255)], encoding: .ascii) ?? "unknown"
+            }
+            return "This iPhone cannot decode the video (format \(codec.trimmingCharacters(in: .whitespaces)))."
+        }
+
         func stop() {
+            controlsTimer?.invalidate()
+            controlsTimer = nil
+            watchdog?.invalidate()
+            watchdog = nil
             if let player, let item = player.currentItem {
                 let d = item.duration.seconds
                 if d.isFinite, d > 0 { parent.onProgress(player.currentTime().seconds, d) }
@@ -608,6 +953,40 @@ private final class WeakHandler: NSObject, WKScriptMessageHandler {
 private let clockScript = """
 (function () {
   if (window.__cfClock) return; window.__cfClock = true;
+  // The page starts silent: while the app looks for its stream the page is out of sight and must not be heard.
+  if (window.__cfMute === undefined) window.__cfMute = true;
+  function applyMute() {
+    document.querySelectorAll('video,audio').forEach(function (v) {
+      if (window.__cfMute) { if (!v.muted) { v.muted = true; v.__cfSilenced = true; } }
+      else if (v.__cfSilenced) { v.muted = false; v.__cfSilenced = false; }
+    });
+  }
+  // While the page is out of sight, press its play button (muted): many players only load the real video once play is pressed.
+  var nudges = 0;
+  var PLAY = ['.plyr__control--overlaid', '.vjs-big-play-button', '.jw-icon-display', '.jw-display-icon-container', '.mejs__overlay-button', '.fp-play', '.ytp-large-play-button', '.dplayer-mobile-play', '.art-state', '[class*="big-play"]', '[class*="bigplay"]', '[class*="play-btn"]', '[class*="play_btn"]', '[class*="playbtn"]', '[class*="play-button"]', '[class*="play_button"]', '[class*="playButton"]', '[aria-label="Play" i]', '[title="Play" i]', 'button[class*="play" i]'];
+  function nudge() {
+    if (!window.__cfMute) return;
+    var started = false;
+    document.querySelectorAll('video').forEach(function (v) {
+      if (!v.paused && v.readyState >= 2) started = true;
+      else if (v.paused && !v.ended) { try { v.muted = true; var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {} }
+    });
+    if (started || nudges++ > 40) return;
+    if (nudges % 3 !== 1) return;
+    for (var i = 0; i < PLAY.length; i++) {
+      var els; try { els = document.querySelectorAll(PLAY[i]); } catch (e) { continue; }
+      for (var k = 0; k < els.length; k++) {
+        var el = els[k], r = el.getBoundingClientRect();
+        if (el.__cfPressed || r.width < 8 || r.height < 8) continue;
+        // Only things that say "play" and nothing else (not a playlist, a replay, the player itself or autoplay).
+        var label = ((el.className && el.className.baseVal === undefined ? el.className : '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.title || '')).toLowerCase();
+        if (/playlist|playback|replay|player|display|autoplay|playing/.test(label) && !/big-play|overlaid/.test(label)) continue;
+        el.__cfPressed = true;
+        try { el.click(); } catch (e) {}
+        return;
+      }
+    }
+  }
   function pick() {
     var best = null, area = -1;
     document.querySelectorAll('video').forEach(function (v) {
@@ -643,14 +1022,20 @@ private let clockScript = """
     document.querySelectorAll('video').forEach(apply);
   };
   setInterval(function () {
+    applyMute();
+    nudge();
     var p = pick();
-    if (!p || !isFinite(p.v.currentTime)) return;
+    if (!p || !isFinite(p.v.currentTime)) {
+      // No video here (yet): still say whether this frame is muted, so a late frame gets the app's current state.
+      try { window.webkit.messageHandlers.cineflixClock.postMessage({ idle: true, mute: !!window.__cfMute, rev: rev }); } catch (e) {}
+      return;
+    }
     try {
       var v = p.v;
       apply(v);
       // Not moving = paused, ended, seeking or buffering.
       var stopped = v.paused || v.ended || v.seeking || v.readyState < 3;
-      window.webkit.messageHandlers.cineflixClock.postMessage({ position: v.currentTime, paused: stopped, weight: p.area + (stopped ? 0 : 1), rev: rev });
+      window.webkit.messageHandlers.cineflixClock.postMessage({ position: v.currentTime, paused: stopped, weight: p.area + (stopped ? 0 : 1), rev: rev, mute: !!window.__cfMute });
     } catch (e) {}
   }, 250);
 })();
@@ -693,12 +1078,17 @@ struct WebPlayerView: UIViewRepresentable {
     let onClose: () -> Void
     /// A stream address the page loaded its media from (see `streamDetectScript`).
     let onStream: (DetectedStream) -> Void
+    var onTrace: ((String, Bool) -> Void)?
+    var onTouch: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> WKWebView {
         let web = makeWebView(handler: context.coordinator, clock: true, streams: true)
+        if let onTouch { web.addGestureRecognizer(TouchWatcher(onTouch)) }
         control.web = web
+        let coordinator = context.coordinator
+        control.mute = { [weak web, weak coordinator] on in if let web { coordinator?.setMuted(on, web: web) } }
         web.navigationDelegate = context.coordinator
         web.load(URLRequest(url: url))
         return web
@@ -742,16 +1132,54 @@ struct WebPlayerView: UIViewRepresentable {
 
         private var frames: [String: WKFrameInfo] = [:]
 
+        /// What each frame of the page has loaded. The player may sit in an iframe, so every frame reports on its own and they are shown together.
+        private var traces: [String: [String]] = [:]
+        private var requestCounts: [String: Int] = [:]
+
+        func reportTrace(_ lines: [String], _ body: [String: Any], from frame: WKFrameInfo) {
+            let key = frame.request.url?.host ?? "page"
+            traces[key] = lines
+            let count = (body["n"] as? NSNumber)?.intValue ?? 0
+            let active = count != requestCounts[key, default: 0] || (body["loading"] as? Bool) == true
+            requestCounts[key] = count
+            let text = traces.count <= 1 ? lines.joined(separator: "\n")
+                : traces.sorted { $0.key < $1.key }.map { "[" + $0.key + "]\n" + $0.value.joined(separator: "\n") }.joined(separator: "\n")
+            parent.onTrace?(text, active)
+        }
+
+        /// The page starts silent (it is hidden while the app looks for its stream). Once the page is shown the app
+        /// stops touching its sound, in every frame, including frames and reloads that appear later.
+        private var muted = true
+
+        func setMuted(_ on: Bool, web: WKWebView) {
+            muted = on
+            let script = "window.__cfMute = \(on);"
+            web.evaluateJavaScript(script) { _, _ in }
+            frames.values.forEach { web.evaluateJavaScript(script, in: $0, in: .page) { _ in } }
+        }
+
         private func push(to frame: WKFrameInfo) {
             web?.evaluateJavaScript(script, in: frame, in: .page) { _ in }
         }
 
         func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "cineflixStream" {
-                if let body = message.body as? [String: Any], let found = DetectedStream(message: body) { parent.onStream(found) }
+                if let body = message.body as? [String: Any] {
+                    if let lines = body["trace"] as? [String] { reportTrace(lines, body, from: message.frameInfo) }
+                    else if let found = DetectedStream(message: body) { parent.onStream(found) }
+                }
                 return
             }
             if message.name == "cineflixClock", let body = message.body as? [String: Any] {
+                if let reported = body["mute"] as? Bool, reported != muted {
+                    web?.evaluateJavaScript("window.__cfMute = \(muted);", in: message.frameInfo, in: .page) { _ in }
+                }
+                if (body["idle"] as? Bool) == true {
+                    let seen = (body["rev"] as? NSNumber)?.intValue ?? 0
+                    frames[message.frameInfo.request.url?.absoluteString ?? ""] = message.frameInfo
+                    if rev > 0, seen != rev { push(to: message.frameInfo) }
+                    return
+                }
                 let pos = (body["position"] as? NSNumber)?.doubleValue ?? 0
                 let paused = (body["paused"] as? Bool) ?? true
                 let weight = (body["weight"] as? NSNumber)?.doubleValue ?? 1

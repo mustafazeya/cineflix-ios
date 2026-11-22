@@ -569,7 +569,7 @@ final class NextEpisodeUITests: FeatureTestCase {
         let card = app.buttons["continue-tv:8001"]
         scrollTo(card, maxSwipes: 2)
         card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertTrue(app.buttons["Subtitles"].waitForExistence(timeout: 20), "player opened")
     }
 
     @MainActor func testCardCountsDownAndPlaysNextEpisode() throws {
@@ -593,6 +593,27 @@ final class NextEpisodeUITests: FeatureTestCase {
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Starting in'")).firstMatch.exists, "no countdown")
         app.buttons["Play now"].tap()
         XCTAssertTrue(app.staticTexts["S1:E3  Episode 3 title"].waitForExistence(timeout: 40), "episode 2 started")
+    }
+
+    @MainActor func testButtonsFollowTheSystemControlsAndComeBackWithTheCard() throws {
+        startEpisode(1)
+        let subtitles = app.buttons["Subtitles"]
+        let systemClose = app.buttons["Close"]
+        XCTAssertTrue(eventually(12) { !subtitles.isHittable && !systemClose.exists }, "our buttons and the system's controls are both gone while playing")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        XCTAssertTrue(eventually(3) { subtitles.isHittable && systemClose.exists }, "a tap brings both back")
+        // They leave together, never one without the other.
+        let end = Date().addingTimeInterval(12)
+        var apart = false
+        while Date() < end && (subtitles.isHittable || systemClose.exists) {
+            if subtitles.isHittable != systemClose.exists { apart = true }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        XCTAssertFalse(subtitles.isHittable || systemClose.exists, "both gone again")
+        XCTAssertFalse(apart, "our buttons never stayed after the system controls left")
+        // The next-episode card needs the viewer, so it brings our buttons back by itself.
+        XCTAssertTrue(app.buttons["Play now"].waitForExistence(timeout: 30), "card shown")
+        XCTAssertTrue(subtitles.isHittable, "buttons are back with the card")
     }
 
     @MainActor func testLastEpisodeHasNoCard() throws {
@@ -630,9 +651,10 @@ final class ResumeUITests: FeatureTestCase {
         XCTAssertTrue(row.label.contains("Resume 1:00"), "row shows the synced position: \(row.label)")
         shot("r01-row")
         row.tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertTrue(playerOpened(), "player opened")
         XCTAssertTrue(eventually(30) { clock() >= 59 }, "playback starts at the synced position (clock \(clock()))")
         XCTAssertTrue(eventually(30) { clock() >= 72 }, "and plays on")
+        showControls()
         app.buttons["Close"].tap()
 
         // The new position goes to the server, as the newest edit.
@@ -657,7 +679,7 @@ final class ResumeUITests: FeatureTestCase {
     @MainActor func testFinishedVideoDeletesItsPosition() throws {
         openVideos([Mock.resume("v:vclip1", position: 380, duration: 400, title: "Clip")])
         app.buttons["video-Clip"].tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
+        XCTAssertTrue(playerOpened(), "player opened")
         XCTAssertTrue(eventually(30) { clock() >= 379 }, "starts near the end")
         // The video ends, the player closes by itself and the entry is a tombstone, so the next play starts at 0.
         XCTAssertTrue(eventually(60) { Mock.item(email, "Mum", "resume", "v:vclip1")?["deleted"] as? Bool == true }, "finished entry deleted")
@@ -668,8 +690,9 @@ final class ResumeUITests: FeatureTestCase {
     @MainActor func testPositionUnderTenSecondsIsNotSaved() throws {
         openVideos()
         app.buttons["video-Clip"].tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20))
+        XCTAssertTrue(playerOpened())
         XCTAssertTrue(eventually(30) { clock() >= 4 })
+        showControls()
         app.buttons["Close"].tap()
         sleep(10)
         XCTAssertNil(Mock.item(email, "Mum", "resume", "v:vclip1"), "nothing saved before 10 seconds")
@@ -681,8 +704,9 @@ final class ResumeUITests: FeatureTestCase {
 /// AirPlay and Chromecast to a real receiver are not part of these tests; they cover finding the stream, handing it to AVPlayer with the
 /// page's Referer and cookie, the position and the way back.
 final class NativeSwitchUITests: FeatureTestCase {
-    override class var extraArguments: [String] { ["-cf.testClock", "YES"] }
+    override class var extraArguments: [String] { ["-cf.testClock", "YES", "-cf.pageReveal", "4", "-cf.showPageNote", "YES"] }
 
+    /// Saves a link to the mock server's page and opens it, like a title from the user's own server.
     private func openPage(_ via: String) {
         Mock.call("POST", Mock.page + "/_test/clear")
         app.tabBars.buttons["My Stuff"].tap()
@@ -701,8 +725,6 @@ final class NativeSwitchUITests: FeatureTestCase {
         let row = app.buttons["video-Page"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), "saved page listed")
         row.tap()
-        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "player opened")
-        XCTAssertFalse(app.buttons["play-natively"].exists || app.buttons["back-to-page-top"].exists, "the page is the default, nothing offered before a stream is seen")
     }
 
     private func clock() -> Int { Int(app.staticTexts["player-clock"].firstMatch.label) ?? -1 }
@@ -711,58 +733,143 @@ final class NativeSwitchUITests: FeatureTestCase {
         Mock.pageLog().filter { $0["path"] as? String == path && $0["native"] as? Bool == true }
     }
 
-    @MainActor func testBlobPageIsPlayedNativelyWithPageHeaders() throws {
+    private func assertNoExtraButtons() {
+        XCTAssertFalse(app.buttons["play-natively"].exists, "no 'Play natively' button")
+        XCTAssertFalse(app.buttons["back-to-page-top"].exists, "no 'Back to page' button")
+    }
+
+    /// Nothing to tap: the stream behind the page's blob: address is found and plays in the app's own player, with the page's Referer and cookie.
+    @MainActor func testPageIsPlayedInTheAppsPlayerByItself() throws {
         openPage("mp4")
-        let button = app.buttons["play-natively"]
-        XCTAssertTrue(button.waitForExistence(timeout: 30), "stream found behind the blob: address")
-        XCTAssertTrue(eventually(30) { clock() >= 3 }, "the page video plays (clock \(clock()))")
-        shot("p01-page")
-        // Not the page's own requests: nothing native has asked for the stream yet.
-        XCTAssertTrue(nativeRequests("/media/clip.mp4").isEmpty)
-        let at = clock()
-        button.tap()
-        XCTAssertTrue(app.buttons["back-to-page-top"].waitForExistence(timeout: 10), "native player shows, with a way back")
-        XCTAssertTrue(eventually(30) { !self.nativeRequests("/media/clip.mp4").isEmpty }, "AVPlayer loaded the real stream address")
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/media/clip.mp4").isEmpty }, "the app's player loaded the real stream address")
         let request = nativeRequests("/media/clip.mp4").first
         XCTAssertEqual(request?["ok"] as? Bool, true, "Referer and cookie of the page were sent: \(request ?? [:])")
         XCTAssertEqual(request?["referer"] as? String, "\(Mock.page)/page?via=mp4")
         XCTAssertTrue((request?["cookie"] as? String ?? "").contains("sid=test"))
-        XCTAssertTrue(eventually(30) { clock() >= at }, "continues at the page's position \(at), clock \(clock())")
-        sleep(3)
-        XCTAssertGreaterThanOrEqual(clock(), at)
-        shot("p02-native")
-        app.buttons["back-to-page-top"].tap()
-        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30), "back on the page, which offers it again")
+        XCTAssertTrue(eventually(30) { clock() >= 3 }, "it plays (clock \(clock()))")
+        shot("p01-native")
+        assertNoExtraButtons()
+        // One close button: the system player's, once the controls are up.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        XCTAssertTrue(eventually(3) { self.app.buttons["Close"].exists })
+        XCTAssertEqual(app.buttons.matching(identifier: "Close").count + app.buttons.matching(NSPredicate(format: "label == 'Close' AND identifier != 'Close Button'")).count, 1, "a single close button")
+        shot("p02-controls")
     }
 
-    @MainActor func testHlsMasterIsPreferredAndAFailingStreamOffersThePage() throws {
+    @MainActor func testHlsMasterIsPlayedAndAFailingStreamOffersThePagePlayer() throws {
         openPage("hls")
-        let button = app.buttons["play-natively"]
-        XCTAssertTrue(button.waitForExistence(timeout: 30), "playlist found")
-        button.tap()
         // The master playlist is what gets played, not one of its qualities.
-        XCTAssertTrue(eventually(30) { !self.nativeRequests("/hls/master.m3u8").isEmpty }, "AVPlayer asked for the master playlist")
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/hls/master.m3u8").isEmpty }, "the app's player asked for the master playlist")
         XCTAssertEqual(nativeRequests("/hls/master.m3u8").first?["ok"] as? Bool, true)
-        // Its segments do not exist, so native playback fails and the page is offered.
-        let back = app.buttons["back-to-page"]
-        XCTAssertTrue(back.waitForExistence(timeout: 40), "failure offers the page")
-        shot("p03-failed")
-        back.tap()
-        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30), "page again")
+        // Its segments do not exist, so playing fails through the phone and then directly; the page's own player takes over by itself, with the reason.
+        XCTAssertTrue(app.staticTexts["fallback-note"].waitForExistence(timeout: 100) || app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Played in the page player'")).firstMatch.waitForExistence(timeout: 5), "page player took over and says why")
+        shot("p03-fallback")
+        let before = nativeRequests("/hls/master.m3u8").count
+        sleep(6)
+        XCTAssertEqual(nativeRequests("/hls/master.m3u8").count, before, "it does not switch back to the app's player again")
+        XCTAssertTrue(app.buttons["Close"].exists, "the page player has a close button")
+        assertNoExtraButtons()
+    }
+
+    /// A frame that appears after the page was shown (an ad or player iframe) is not silenced by the app: the page's sound is its own.
+    @MainActor func testFrameCreatedAfterRevealIsNotMuted() throws {
+        openPage("late")
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 25), "the page is shown")
+        XCTAssertTrue(eventually(40) { !Mock.pageLog().filter { $0["path"] as? String == "/frame-state" }.isEmpty }, "the late frame loaded")
+        sleep(3)
+        let states = Mock.pageLog().filter { $0["path"] as? String == "/frame-state" }
+        XCTAssertEqual(states.last?["muted"] as? Bool, false, "the late frame's video was left alone (\(states.suffix(3)))")
     }
 
     @MainActor func testStreamFoundThroughXHR() throws {
         openPage("xhr")
-        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/media/clip.mp4").isEmpty })
     }
 
     @MainActor func testStreamFoundThroughHlsJsLoadSource() throws {
         openPage("hlsjs")
-        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/hls/master.m3u8").isEmpty })
     }
 
     @MainActor func testStreamFoundThroughSrcProperty() throws {
         openPage("src")
-        XCTAssertTrue(app.buttons["play-natively"].waitForExistence(timeout: 30))
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/media/clip.mp4").isEmpty })
+    }
+
+    /// A tiny MP4 (the first piece of a stream the page assembles itself) is not a video: the app does not hand it to the iPhone's player.
+    @MainActor func testTinyInitFileIsNotPlayedNatively() throws {
+        openPage("initseg")
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 25), "the page is shown after a few seconds")
+        sleep(5)
+        let played = nativeRequests("/media/init.mp4").filter { ($0["range"] as? String ?? "") != "bytes=0-0" }
+        XCTAssertTrue(played.isEmpty, "the app's player never played the tiny file (only its one-byte size check): \(played)")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Played in the page player'")).firstMatch.exists == false, "no failure happened: it was never tried")
+        assertNoExtraButtons()
+    }
+
+    /// A player that only loads its video once its play button is pressed: the app presses it (muted, out of sight).
+    @MainActor func testPageThatWaitsForPlayIsStartedByTheApp() throws {
+        openPage("lazy")
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/media/clip.mp4").filter { ($0["range"] as? String ?? "") != "bytes=0-0" }.isEmpty }, "the app pressed play and then played the real stream")
+    }
+
+    /// A playlist served under a name and type that say nothing about it is recognised by its first line.
+    @MainActor func testPlaylistWithoutPlaylistNameIsFound() throws {
+        openPage("hlstxt")
+        XCTAssertTrue(eventually(40) { !self.nativeRequests("/hls/master.txt").isEmpty }, "the app's player asked for the disguised master playlist")
+    }
+
+    private func playedNatively(_ path: String) -> Bool {
+        !nativeRequests(path).filter { !["bytes=0-0", "bytes=0-4095"].contains($0["range"] as? String ?? "") }.isEmpty
+    }
+
+    /// A video element given an address with no file name (a plain /video/123 style link) is still a video: the app reads its first bytes.
+    @MainActor func testAddressWithoutFileNameIsRecognisedByItsContent() throws {
+        openPage("noext")
+        XCTAssertTrue(eventually(40) { self.playedNatively("/media/clip") }, "the app's player played the address that has no file name")
+    }
+
+    /// The stream address only appears inside the page's own JSON answer.
+    @MainActor func testStreamAddressInsideJsonIsFound() throws {
+        openPage("api")
+        XCTAssertTrue(eventually(40) { self.playedNatively("/media/clip.mp4") }, "the app's player played the address named in the JSON")
+    }
+
+    /// A page that keeps working for a while is not shown early: the stream turns up after about nine seconds.
+    @MainActor func testBusyPageIsWaitedFor() throws {
+        openPage("busy")
+        XCTAssertTrue(eventually(60) { self.playedNatively("/media/clip.mp4") }, "the app's player played the stream that appeared late")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'no stream found'")).firstMatch.exists, "the page was not shown while it was still busy")
+    }
+
+    /// A page that never loads a stream (for example one waiting for a tap on its own play button) is shown after a few seconds.
+    @MainActor func testPageWithoutAStreamIsShownAfterAWhile() throws {
+        openPage("none")
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 20), "page shown with a close button")
+        XCTAssertTrue(nativeRequests("/media/clip.mp4").isEmpty)
+        assertNoExtraButtons()
+    }
+}
+
+/// The player hides its buttons while a video plays, so tests touch the screen until the close button is there.
+extension FeatureTestCase {
+    func showControls() {
+        let close = app.buttons["Close"]
+        var tries = 0
+        while !close.isHittable && tries < 8 {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+            Thread.sleep(forTimeInterval: 0.6)
+            tries += 1
+        }
+    }
+
+    func playerOpened() -> Bool {
+        let end = Date().addingTimeInterval(25)
+        while Date() < end {
+            if app.buttons["Close"].exists { return true }
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        return app.buttons["Close"].exists
     }
 }

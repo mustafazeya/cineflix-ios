@@ -16,6 +16,28 @@ let streamDetectScript = """
 (function () {
   if (window.__cfStreams) return; window.__cfStreams = true;
   var seen = {};
+  // What the page loads, in a few words per request, so a page whose stream is not found can be understood (shown by the app on failure).
+  var trace = [], traceKeys = {}, mseAppends = 0, requests = 0, cands = 0, lastSig = '';
+  function tail(u) { try { var p = new URL(u).pathname.split('/').filter(Boolean); var t = p[p.length - 1] || '/'; return t.length > 26 ? t.slice(0, 12) + '..' + t.slice(-10) : t; } catch (e) { return '?'; } }
+  function pushTrace(line) {
+    if (trace.length >= 14 || traceKeys[line]) return;
+    traceKeys[line] = 1; trace.push(line);
+  }
+  function note(kind, u, status, type, size) {
+    requests++;
+    if (/\\.(js|css|woff2?|ttf|svg|ico|html?)(\\?|#|$)/i.test(u)) return;
+    var t = (type || '').split(';')[0] || 'no type';
+    pushTrace(kind + ' ' + status + ' ' + tail(u) + ' ' + t + (size ? ' ' + (size > 1048576 ? (size / 1048576).toFixed(1) + 'MB' : size > 1024 ? Math.round(size / 1024) + 'KB' : size + 'B') : ''));
+  }
+  function sizeOf(len, range) { var m = range && /\\/(\\d+)$/.exec(range); return m ? Number(m[1]) : (len ? Number(len) : 0); }
+  try {
+    if (window.MediaSource) {
+      var asb = MediaSource.prototype.addSourceBuffer;
+      MediaSource.prototype.addSourceBuffer = function (mime) { pushTrace('MSE ' + mime); return asb.apply(this, arguments); };
+      var app = SourceBuffer.prototype.appendBuffer;
+      SourceBuffer.prototype.appendBuffer = function () { mseAppends++; if (mseAppends === 1 || mseAppends % 20 === 0) pushTrace('MSE appends ' + mseAppends); return app.apply(this, arguments); };
+    }
+  } catch (e) {}
   var SKIP = /\\.(ts|m4s|m4f|m4a|aac|mp3|vtt|webvtt|srt|key|cmfv|cmfa|mpd|jpe?g|png|gif|webp|svg|js|css|json|woff2?)(\\?|#|$)/i;
   var FILES = { mp4: 1, webm: 1, mov: 1, m4v: 1 };
   function abs(u) { try { return new URL(String(u), location.href).href; } catch (e) { return null; } }
@@ -29,6 +51,31 @@ let streamDetectScript = """
       window.webkit.messageHandlers.cineflixStream.postMessage({ url: u, kind: kind, variants: variants || [], referer: location.href, ua: navigator.userAgent });
     } catch (e) {}
   }
+  // An address that is certainly media (it was given to a video element) or may be (named in the page's own data) but whose kind is not
+  // known by its name. The app looks at the first bytes itself and decides.
+  function candidate(u) {
+    if (!web(u) || cands >= 30) return;
+    if (seen['candidate|' + u]) return;
+    cands++;
+    report(u, 'candidate');
+  }
+  // Stream addresses that the page's own JSON answers name, for example {"source":"https:\\/\\/host\\/video\\/master.m3u8"}.
+  function scanJson(t) {
+    if (typeof t !== 'string' || t.length > 1500000) return;
+    var re = /https?:\\/\\/[^"'\\s<>\\\\]+?\\.(?:m3u8|mp4|webm|mov)(?:\\?[^"'\\s<>\\\\]*)?/gi, m, n = 0;
+    t = t.replace(/\\\\\\//g, '/');
+    while ((m = re.exec(t)) && n++ < 6) candidate(m[0]);
+  }
+  // Loads that the browser makes for a video element itself never pass through fetch or XMLHttpRequest; the resource timeline lists them.
+  try {
+    new PerformanceObserver(function (list) {
+      list.getEntries().forEach(function (en) {
+        if (!/^(video|audio|source|track|other)$/.test(en.initiatorType) || !web(en.name) || /\\.(js|css|woff2?|svg|png|jpe?g|gif|webp|ico|html?|json)(\\?|#|$)/i.test(en.name)) return;
+        var e = ext(en.name);
+        if (e === 'm3u8') report(en.name, 'hls'); else if (FILES[e]) report(en.name, 'file'); else candidate(en.name);
+      });
+    }).observe({ type: 'resource', buffered: true });
+  } catch (e) {}
   // A master playlist lists variants (#EXT-X-STREAM-INF) and renditions (URI="..."); a media playlist lists segments (#EXTINF).
   function sniff(u, text) {
     var kind = 'hls', variants = [];
@@ -51,6 +98,8 @@ let streamDetectScript = """
   function inspect(u, type, text) {
     if (!web(u)) return;
     var e = ext(u), hls = e === 'm3u8' || /mpegurl/i.test(type || '');
+    // A playlist is recognised by what it says, not by its name: servers call them .txt, .php or nothing at all.
+    if (!hls && text) { var t = null; try { t = text(); } catch (x) {} if (typeof t === 'string' && /^\\uFEFF?\\s*#EXTM3U/.test(t.slice(0, 16))) { sniff(u, t); return; } }
     if (hls) { sniff(u, text ? text() : null); return; }
     if (SKIP.test(u)) return;
     if (FILES[e] || /^video\\/(mp4|webm|quicktime)/i.test(type || '')) report(u, 'file');
@@ -60,7 +109,7 @@ let streamDetectScript = """
     var u = abs(v);
     if (!web(u)) return;
     var e = ext(u);
-    if (e === 'm3u8') report(u, 'hls'); else if (FILES[e]) report(u, 'file');
+    if (e === 'm3u8') report(u, 'hls'); else if (FILES[e]) report(u, 'file'); else if (!SKIP.test(u)) candidate(u);
   }
 
   try {
@@ -71,6 +120,8 @@ let streamDetectScript = """
         x.addEventListener('load', function () {
           if (x.status < 200 || x.status >= 300) return;
           var fin = x.responseURL || u;
+          try { note('xhr', fin, x.status, x.getResponseHeader('content-type'), sizeOf(x.getResponseHeader('content-length'), x.getResponseHeader('content-range'))); } catch (e) {}
+          try { if (/json/i.test(x.getResponseHeader('content-type') || '') && (x.responseType === '' || x.responseType === 'text')) scanJson(x.responseText); } catch (e) {}
           inspect(fin, x.getResponseHeader('content-type'), function () { return x.responseType === '' || x.responseType === 'text' ? x.responseText : null; });
         });
       } catch (e) {}
@@ -88,8 +139,23 @@ let streamDetectScript = """
           try {
             if (!res.ok) return;
             var fin = res.url || u, type = res.headers.get('content-type') || '';
+            var len = sizeOf(res.headers.get('content-length'), res.headers.get('content-range'));
+            note('fetch', fin, res.status, type, len);
+            if (/json/i.test(type) && (!len || len < 1500000)) { try { res.clone().text().then(scanJson, function () {}); } catch (e) {} }
             if (ext(fin) === 'm3u8' || /mpegurl/i.test(type)) {
               res.clone().text().then(function (t) { inspect(fin, type, function () { return t; }); }, function () { inspect(fin, type, null); });
+            } else if (!/^(video|audio|text\\/html|text\\/css|font)\\//i.test(type) && !/javascript|json/i.test(type) && (!len || len < 2097152) && !SKIP.test(fin) || /^(text\\/plain|application\\/octet-stream)/i.test(type)) {
+              // Look at the first bytes only; read the rest if it turns out to be a playlist. Both copies are taken now: once the page has
+              // read the response, it can no longer be copied.
+              try {
+                var full = res.clone(), rd = res.clone().body.getReader();
+                rd.read().then(function (r) {
+                  try { rd.cancel(); } catch (e) {}
+                  var head = ''; if (r && r.value) for (var i = 0; i < Math.min(12, r.value.length); i++) head += String.fromCharCode(r.value[i]);
+                  if (head.indexOf('#EXTM3U') >= 0) full.text().then(function (t) { inspect(fin, type, function () { return t; }); }, function () {});
+                  else { try { full.body.cancel(); } catch (e) {} inspect(fin, type, null); }
+                }, function () { inspect(fin, type, null); });
+              } catch (e) { inspect(fin, type, null); }
             } else inspect(fin, type, null);
           } catch (e) {}
         }, function () {});
@@ -129,8 +195,30 @@ let streamDetectScript = """
   } catch (e) {}
 
   // <source> elements and video tags written into the page's HTML, and a late hls.js.
+  // Once a second: how the page's video element and frames are doing, so the app can tell a page that is still busy from one that is stuck.
+  function status() {
+    try {
+      var vs = document.querySelectorAll('video'), vline = '', loading = false;
+      if (vs.length) {
+        var v0 = vs[0], src = v0.currentSrc || v0.getAttribute('src') || '';
+        vline = 'video ' + (src ? tail(src) : 'no src') + ' ready ' + v0.readyState + ' net ' + v0.networkState + (v0.error ? ' error ' + v0.error.code : '');
+        loading = v0.networkState === 2;
+      }
+      var fr = document.querySelectorAll('iframe'), fline = '';
+      if (fr.length) fline = 'iframes ' + Array.prototype.map.call(fr, function (f) { try { return new URL(f.src).host; } catch (e) { return 'inline'; } }).slice(0, 3).join(' ');
+      var lines = trace.slice();
+      if (fline) lines.push(fline);
+      if (vline) lines.push(vline);
+      if (mseAppends) lines.push('MSE appended ' + mseAppends + ' pieces');
+      var sig = requests + '|' + lines.join('|');
+      if (sig === lastSig) return;
+      lastSig = sig;
+      window.webkit.messageHandlers.cineflixStream.postMessage({ trace: lines, n: requests, loading: loading });
+    } catch (e) {}
+  }
   setInterval(function () {
     wrapHls(window.Hls);
+    status();
     var els = document.querySelectorAll('video, audio, source');
     for (var i = 0; i < els.length; i++) { var u = els[i].currentSrc || els[i].getAttribute('src'); if (u) assigned(u); }
   }, 1000);
@@ -141,6 +229,8 @@ let streamDetectScript = """
 struct DetectedStream: Equatable {
     /// How sure we are that this address is the thing to play. The higher, the better.
     enum Kind: Int {
+        /// Not yet looked at: the app reads the first bytes to find out what it is (never offered to the picker as it is).
+        case candidate = 0
         case media = 1      // one quality of an HLS stream
         case file = 3       // .mp4, .webm, .mov
         case hls = 4        // an .m3u8 whose type could not be read
@@ -162,6 +252,7 @@ struct DetectedStream: Equatable {
         case "media": kind = .media
         case "file": kind = .file
         case "hls": kind = .hls
+        case "candidate": kind = .candidate
         default: return nil
         }
         self.url = url
@@ -183,9 +274,15 @@ struct DetectedStream: Equatable {
 /// an earlier one of the same or lower rank (the page moved on to another video).
 struct StreamPicker {
     private(set) var best: DetectedStream?
+    /// Addresses that turned out not to be a whole video (a tiny file: the initialisation piece of a stream the page assembles itself).
+    private var rejected: Set<URL> = []
+    private var probed: Set<URL> = []
+    /// Why addresses were turned down, for the note shown when nothing playable was found.
+    private(set) var rejectedNotes: [String] = []
 
     @discardableResult
     mutating func offer(_ found: DetectedStream) -> Bool {
+        if rejected.contains(found.url) { return false }
         if let best {
             if best.url == found.url { self.best = found; return best != found }
             if best.kind == .master, best.variants.contains(found.url) { return false }
@@ -196,7 +293,15 @@ struct StreamPicker {
         return true
     }
 
-    mutating func reset() { best = nil }
+    mutating func shouldProbe(_ url: URL) -> Bool { probed.count < 40 && probed.insert(url).inserted }
+
+    mutating func reject(_ url: URL, because why: String = "") {
+        if !why.isEmpty, rejectedNotes.count < 4 { rejectedNotes.append(why) }
+        rejected.insert(url)
+        if best?.url == url { best = nil }
+    }
+
+    mutating func reset() { best = nil; rejected = []; probed = []; rejectedNotes = [] }
 }
 
 /// What the native player needs to load the address the way the page did.
@@ -229,6 +334,8 @@ struct NativeStream: Equatable {
 /// Lets the player screen reach the web view that shows the page (to read its cookies).
 final class WebPageControl {
     weak var web: WKWebView?
+    /// Silences (or restores) the page's video while it is open out of sight.
+    var mute: ((Bool) -> Void)?
 
     /// Cookies the page's browser holds that apply to `url`.
     func cookies(for url: URL) async -> [HTTPCookie] {

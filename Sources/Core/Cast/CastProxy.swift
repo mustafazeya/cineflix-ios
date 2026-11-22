@@ -12,7 +12,8 @@ nonisolated final class CastProxy: @unchecked Sendable {
 
     enum Source: Sendable {
         /// `headers` are what the original page sent (Referer, Cookie, ...) for streams that check them; the receiver cannot send them itself.
-        case url(URL, headers: [String: String] = [:])
+        /// `segmentType` is set for pieces taken from an HLS playlist: a server that labels them as images or plain text gets them relabelled.
+        case url(URL, headers: [String: String] = [:], segmentType: String? = nil)
         case mega(MegaDownload)
         case subtitles(String)
     }
@@ -25,6 +26,18 @@ nonisolated final class CastProxy: @unchecked Sendable {
     private var sources: [String: Source] = [:]
     private var exchanges: [ObjectIdentifier: AnyObject] = [:]
     private let maxSources = 20_000
+
+    private var problem: String?
+    private var traceLines: [String] = []
+    /// What last went wrong between the phone and the stream's server (a refused request, a network error), for the failure screen.
+    var lastProblem: String? { queue.sync { problem } }
+    fileprivate func note(_ text: String) { problem = text }
+    /// A few facts about what the stream's server sent (kinds, types, first bytes), shown when playback fails so the cause can be told.
+    var trace: String { queue.sync { traceLines.joined(separator: "\n") } }
+    fileprivate func record(_ line: String) {
+        if traceLines.count < 7 { traceLines.append(line) }
+    }
+    func clearProblem() { queue.async { self.problem = nil; self.traceLines.removeAll() } }
 
     private init() {
         let operations = OperationQueue()
@@ -64,8 +77,11 @@ nonisolated final class CastProxy: @unchecked Sendable {
     }
 
     /// The address the receiver should load for `source`, or nil when the phone has no network address to offer.
-    func publish(_ source: Source) async -> URL? {
+    /// `playlist` marks an HLS playlist whatever its address says: the iPhone's player decides by the address's ending, and a playlist
+    /// called `.txt`, `.php` or nothing at all would not be opened as a stream.
+    func publish(_ source: Source, playlist: Bool = false) async -> URL? {
         start()
+        clearProblem()
         for _ in 0..<30 {
             if queue.sync(execute: { port != 0 }) { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -73,22 +89,26 @@ nonisolated final class CastProxy: @unchecked Sendable {
         guard let host = Self.localIPv4Address() else { return nil }
         return queue.sync {
             guard port != 0 else { return nil }
-            return URL(string: "http://\(host):\(port)\(register(source))")
+            return URL(string: "http://\(host):\(port)\(register(source, playlist: playlist))")
         }
     }
 
     /// Must run on `queue`. Returns the path the receiver should request.
-    fileprivate func register(_ source: Source) -> String {
+    fileprivate func register(_ source: Source, playlist: Bool = false) -> String {
         if sources.count > maxSources { sources.removeAll() }
         let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         sources[token] = source
         // The extension lets the receiver recognise the stream type from the address.
         let ext: String
-        switch source {
-        case .url(let url, _): ext = url.pathExtension.lowercased()
+        if playlist { ext = "m3u8" } else { switch source {
+        case .url(let url, _, let segmentType):
+            let known: Set<String> = ["ts", "m4s", "mp4", "m4a", "m4v", "aac", "mp3", "vtt", "webvtt", "cmfv", "cmfa", "key", "m3u8", "webm", "mov", "mkv"]
+            let found = url.pathExtension.lowercased()
+            // An unrecognised extension on a segment (.jpg, .html, none) would make AVPlayer doubt what it is.
+            ext = segmentType != nil && !known.contains(found) ? (segmentType == "video/mp4" ? "mp4" : "ts") : found
         case .mega(let dl): ext = MegaFormat.isVideo(dl.name) ? MegaFormat.ext(dl.name) : "mp4"
         case .subtitles: ext = "vtt"
-        }
+        } }
         return "/p/\(token)" + (ext.isEmpty ? "" : ".\(ext)")
     }
 
@@ -110,7 +130,7 @@ nonisolated final class CastProxy: @unchecked Sendable {
         case .mega(let dl):
             let known = fileType(MegaFormat.ext(dl.name))
             return known.isEmpty ? "video/mp4" : known
-        case .url(let url, let headers):
+        case .url(let url, let headers, _):
             let path = url.path.lowercased()
             if path.hasSuffix(".m3u8") { return "application/x-mpegURL" }
             if path.hasSuffix(".mpd") { return "application/dash+xml" }
@@ -185,6 +205,11 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
     private var body = Data()
     private var responseURL: URL?
     private var headSent = false
+    private var pendingHead: (status: Int, headers: [String: String])?
+    /// Holding the first bytes of a video piece to see whether something precedes the video itself.
+    private var sniffingPiece = false
+    private var tracedStart = false
+    private var piece = Data()
     private var pendingBytes = 0
     private var suspended = false
 
@@ -260,11 +285,12 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
         switch source {
         case .subtitles(let text):
             send(status: 200, headers: ["Content-Type": "text/vtt; charset=utf-8"], body: method == "HEAD" ? Data() : Data(text.utf8))
-        case .url(let url, let extra):
+        case .url(let url, let extra, let segmentType):
             var request = URLRequest(url: url)
             request.httpMethod = method
             extra.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-            if let range = headers["range"] { request.setValue(range, forHTTPHeaderField: "Range") }
+            // A piece of an HLS stream is always fetched whole: its first bytes may need cleaning, which shifts every offset.
+            if let range = headers["range"], segmentType == nil { request.setValue(range, forHTTPHeaderField: "Range") }
             let task = proxy.session.dataTask(with: request)
             task.delegate = self
             self.task = task
@@ -332,18 +358,27 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
         }
         responseURL = http.url
         let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-        let path = (http.url ?? dataTask.originalRequest?.url)?.path.lowercased() ?? ""
+        let target = http.url ?? dataTask.originalRequest?.url
+        let path = target?.path.lowercased() ?? ""
         let isPlaylist = path.hasSuffix(".m3u8") || path.hasSuffix(".m3u") || contentType.contains("mpegurl")
-        buffering = dataTask.originalRequest?.httpMethod != "HEAD" && isPlaylist
-
-        if !buffering {
-            var out: [String: String] = [:]
-            for name in ["Content-Type", "Content-Range", "Accept-Ranges"] {
-                if let value = http.value(forHTTPHeaderField: name) { out[name] = value }
-            }
-            if http.value(forHTTPHeaderField: "Content-Encoding") == nil, let length = http.value(forHTTPHeaderField: "Content-Length") { out["Content-Length"] = length }
-            sendHead(status: http.statusCode, headers: out)
+        let isHead = dataTask.originalRequest?.httpMethod == "HEAD"
+        buffering = !isHead && isPlaylist
+        proxy.record("\(isPlaylist ? "playlist" : (source.flatMap { if case .url(_, _, let t) = $0 { t } else { nil } } != nil ? "piece" : "file")) \(http.statusCode) \(contentType.isEmpty ? "no type" : contentType) .\(target?.pathExtension ?? "")\(http.value(forHTTPHeaderField: "Content-Range").map { " range " + $0 } ?? "")")
+        if http.statusCode >= 400 {
+            proxy.note("HTTP \(http.statusCode) from \(target?.host ?? "the server") \(target?.lastPathComponent ?? "")")
         }
+
+        var out: [String: String] = [:]
+        for name in ["Content-Type", "Content-Range", "Accept-Ranges"] {
+            if let value = http.value(forHTTPHeaderField: name) { out[name] = value }
+        }
+        if case .url(_, _, let segmentType)? = source, let segmentType, contentType.isEmpty || contentType.hasPrefix("image/") || contentType.hasPrefix("text/") {
+            out["Content-Type"] = segmentType
+        }
+        if http.value(forHTTPHeaderField: "Content-Encoding") == nil, let length = http.value(forHTTPHeaderField: "Content-Length") { out["Content-Length"] = length }
+        // The status line goes out with the first bytes: a playlist that carries no playlist name or type is only recognised by what it says.
+        if case .url(_, _, let segmentType)? = source, segmentType != nil, !buffering, !isHead, http.statusCode == 200 { sniffingPiece = true }
+        if !buffering { if isHead { sendHead(status: http.statusCode, headers: out) } else { pendingHead = (http.statusCode, out) } }
         completionHandler(.allow)
     }
 
@@ -352,6 +387,32 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
             body.append(data)
             return
         }
+        if sniffingPiece {
+            piece.append(data)
+            if piece.count >= Self.sniffBytes { releasePiece() }
+            return
+        }
+        if !headSent, let pending = pendingHead {
+            if String(decoding: data.prefix(64), as: UTF8.self).trimmingCharacters(in: CharacterSet(charactersIn: "\u{FEFF}\n\r\t ")).hasPrefix("#EXTM3U") {
+                buffering = true
+                pendingHead = nil
+                body.append(data)
+                return
+            }
+            // Its length no longer matches once relabelled or rewritten, so only plain pass-through keeps the upstream length.
+            sendHead(status: pending.status, headers: pending.headers)
+            pendingHead = nil
+        }
+        if !tracedStart, !(source.flatMap { if case .url(_, _, let t) = $0 { t } else { nil } } != nil) {
+            tracedStart = true
+            let b = [UInt8](data.prefix(12))
+            let brand = b.count >= 12 && Array(b[4..<8]) == Array("ftyp".utf8) ? " brand " + String(decoding: b[8..<12], as: UTF8.self) : ""
+            proxy.record("file starts with \(Self.describe(data))\(brand)")
+        }
+        forward(data)
+    }
+
+    private func forward(_ data: Data) {
         pendingBytes += data.count
         connection.send(content: data, completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
@@ -364,39 +425,106 @@ private nonisolated final class Exchange: NSObject, URLSessionDataDelegate, @unc
         // The receiver reads slower than the server delivers; pause the download instead of filling memory.
         if pendingBytes > 2 * 1024 * 1024 && !suspended {
             suspended = true
-            dataTask.suspend()
+            task?.suspend()
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if error != nil, !headSent { return finish(status: 502) }
-        guard buffering, case .url(let original, let headers)? = source else { return close() }
+        if let error, !headSent {
+            proxy.note("Network error from the stream's server: \(error.localizedDescription)")
+            return finish(status: 502)
+        }
+        if sniffingPiece { releasePiece() }
+        if !headSent, !buffering, let pending = pendingHead { sendHead(status: pending.status, headers: pending.headers); pendingHead = nil }
+        guard buffering, case .url(let original, let headers, _)? = source else { return close() }
         let text = rewritePlaylist(String(decoding: body, as: UTF8.self), base: responseURL ?? original, headers: headers)
         send(status: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(text.utf8))
     }
 
-    /// Points every URL in an HLS playlist back at this proxy.
+    /// Points every URL in an HLS playlist back at this proxy. Playlists stay playlists; pieces of video are tagged so a server that
+    /// labels them as images still plays.
     private func rewritePlaylist(_ text: String, base: URL, headers: [String: String]) -> String {
         let attribute = try? NSRegularExpression(pattern: #"URI="([^"]*)""#)
+        let fragmented = text.contains("#EXT-X-MAP")
+        let key = text.components(separatedBy: .newlines).first { $0.hasPrefix("#EXT-X-KEY") }.map { $0.contains("METHOD=NONE") ? "no encryption" : ($0.contains("SAMPLE-AES") ? "SAMPLE-AES" : ($0.contains("AES-128") ? "AES-128" : "encrypted")) } ?? "no encryption"
+        proxy.record("playlist: \(fragmented ? "fMP4" : "TS"), \(key), \(text.components(separatedBy: "#EXTINF").count - 1) pieces")
+        let pieceType = fragmented ? "video/mp4" : "video/mp2t"
 
-        func proxied(_ reference: String) -> String? {
+        func proxied(_ reference: String, piece: Bool, playlist: Bool = false) -> String? {
             guard let absolute = URL(string: reference, relativeTo: base)?.absoluteURL, absolute.scheme == "http" || absolute.scheme == "https" else { return nil }
-            return proxy.register(.url(absolute, headers: headers))
+            return proxy.register(.url(absolute, headers: headers, segmentType: piece ? pieceType : nil), playlist: playlist)
         }
 
+        var previous = ""
         return text.components(separatedBy: .newlines).map { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            defer { if !trimmed.isEmpty { previous = trimmed } }
             if trimmed.isEmpty { return line }
-            guard trimmed.hasPrefix("#") else { return proxied(trimmed) ?? line }
+            // A line that is not a tag is the next playlist after STREAM-INF (a master playlist), otherwise a piece of the video.
+            guard trimmed.hasPrefix("#") else {
+                let isPlaylist = previous.hasPrefix("#EXT-X-STREAM-INF")
+                return proxied(trimmed, piece: !isPlaylist, playlist: isPlaylist) ?? line
+            }
             guard let attribute else { return line }
+            // Keys and subtitle or audio playlists are not video pieces; only the initialisation section of fragmented video is.
+            let piece = trimmed.hasPrefix("#EXT-X-MAP")
+            let isRendition = trimmed.hasPrefix("#EXT-X-MEDIA") || trimmed.hasPrefix("#EXT-X-I-FRAME-STREAM-INF")
             var result = line
             for match in attribute.matches(in: line, range: NSRange(line.startIndex..., in: line)).reversed() {
                 guard let whole = Range(match.range, in: result), let inner = Range(match.range(at: 1), in: result),
-                      let replacement = proxied(String(result[inner])) else { continue }
+                      let replacement = proxied(String(result[inner]), piece: piece, playlist: isRendition) else { continue }
                 result.replaceSubrange(whole, with: "URI=\"\(replacement)\"")
             }
             return result
         }.joined(separator: "\n")
+    }
+
+    // MARK: Pieces of video
+
+    private static let sniffBytes = 16_384
+
+    /// Some servers put a picture (a PNG, JPEG or GIF header, or an HTML stub) in front of every piece of video so that it looks like an
+    /// image. A browser's player skips it; the iPhone's player cannot read the piece at all. Everything before the first video packet is dropped.
+    private func releasePiece() {
+        sniffingPiece = false
+        guard let pending = pendingHead else { return }
+        pendingHead = nil
+        let skip = Self.videoOffset(in: piece)
+        proxy.record("piece starts with \(Self.describe(piece))\(skip.map { $0 > 0 ? ", video found after \($0) bytes" : ", plain video" } ?? ", no video found")")
+        if skip == nil { proxy.note("The stream's video pieces are not MPEG-TS or MP4 (they start with \(Self.describe(piece)))") }
+        let drop = skip ?? 0
+        var headers = pending.headers
+        if drop > 0 {
+            headers.removeValue(forKey: "Content-Range")
+            if let length = headers["Content-Length"].flatMap(Int.init) { headers["Content-Length"] = String(max(0, length - drop)) }
+        }
+        sendHead(status: pending.status, headers: headers)
+        let bytes = piece.dropFirst(drop)
+        piece = Data()
+        if !bytes.isEmpty { forward(Data(bytes)) }
+    }
+
+    /// Where the video starts: 0 when the piece already is video, the offset of the first MPEG-TS packet when something precedes it, nil if it
+    /// does not look like video at all.
+    static func videoOffset(in data: Data) -> Int? {
+        let b = [UInt8](data.prefix(sniffBytes))
+        if b.count >= 8, Array(b[4..<8]) == Array("ftyp".utf8) || Array(b[4..<8]) == Array("styp".utf8) || Array(b[4..<8]) == Array("moof".utf8) { return 0 }
+        func isTS(at i: Int) -> Bool {
+            // Three packets in a row, 188 bytes apart (a lone 0x47 is too easy to hit by chance).
+            i + 376 < b.count && b[i] == 0x47 && b[i + 188] == 0x47 && b[i + 376] == 0x47
+        }
+        if b.count < 377 { return b.first == 0x47 ? 0 : nil }
+        for i in 0..<(b.count - 376) where isTS(at: i) { return i }
+        return nil
+    }
+
+    private static func describe(_ data: Data) -> String {
+        let b = [UInt8](data.prefix(8))
+        if b.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "a PNG picture" }
+        if b.starts(with: [0xFF, 0xD8]) { return "a JPEG picture" }
+        if b.starts(with: Array("GIF8".utf8)) { return "a GIF picture" }
+        if b.starts(with: Array("<".utf8)) { return "a web page" }
+        return b.map { String(format: "%02x", $0) }.joined(separator: " ")
     }
 
     // MARK: Writing
